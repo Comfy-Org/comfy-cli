@@ -6,7 +6,7 @@ is convenient but leaves no reusable artifact: no workflow JSON you can re-run,
 edit, or drop into a fragment pipeline. The same partner models also exist as
 ComfyUI **API NODES**. ``--emit-workflow <path>`` takes the exact same
 ``--param`` values the proxy path would consume and writes an API-format
-workflow that drives the partner node, plus a ``SaveImage``/``SaveVideo`` so the
+workflow that drives the partner node, plus a ``SaveImageAdvanced``/``SaveVideo`` so the
 result lands on disk when run with ``comfy run``.
 
 The proxy-model → node-class mapping is intentionally small and explicit: it
@@ -35,13 +35,26 @@ class UnsupportedModelError(EmitError):
     the remedy is different — pick a model from ``supported`` — and an agent
     needs to branch on that without parsing prose. ``generate list`` exposes
     the same answer up front as ``emit_supported`` per row.
+
+    ``suggested`` is the subset of ``supported`` that produces the same kind of
+    media as ``model`` (image or video), the same partner's aliases first, and
+    whose required inputs the request already carries — the alias to retry
+    with in one step. Empty when ``model`` is not in the catalog or nothing
+    emittable fits the request as given.
     """
 
-    def __init__(self, model: str, supported: list[str]):
+    def __init__(self, model: str, supported: list[str], suggested: list[str] | None = None):
         self.model = model
         self.supported = supported
+        self.suggested = list(suggested or [])
+        closest = (
+            f"Closest emittable model: {self.suggested[0]} (`comfy generate {self.suggested[0]} … --emit-workflow`).\n"
+            if self.suggested
+            else ""
+        )
         super().__init__(
             f"--emit-workflow does not support model {model!r}.\n"
+            f"{closest}"
             f"Supported models: {', '.join(supported)}.\n"
             "These map to ComfyUI API nodes; other proxy models have no node mapping yet."
         )
@@ -61,7 +74,7 @@ class NodeSpec:
     that must be materialized with a ``LoadImage`` node and wired into the
     partner node's matching input. ``fixed`` are node inputs always set to a
     constant (defaults the node requires but that ``generate`` doesn't surface).
-    ``output`` selects the save node (IMAGE → SaveImage, VIDEO → SaveVideo) and
+    ``output`` selects the save node (IMAGE → SaveImageAdvanced, VIDEO → SaveVideo) and
     the partner node's output port that carries the media.
 
     COMPLETENESS CONTRACT for ``fixed``: it must supply a default for EVERY
@@ -95,6 +108,32 @@ class NodeSpec:
     # ride a blanket exemption. `test_emit.py` asserts the flag matches the
     # recorded catalog in both directions.
     deprecated_ok: bool = False
+    # `--model` value → the spec that runs it, for aliases whose models live on
+    # different node classes (nano-banana's gemini-3-pro-image-preview is only
+    # on GeminiImage2Node). Consulted before anything is built.
+    model_variants: dict[str, NodeSpec] = field(default_factory=dict)
+    # Flag → values the emitted graph already produces, so the flag is accepted
+    # and needs no input (flux-2's `--output_format png`: SaveImage writes PNG).
+    # Any other value is still refused as unmapped.
+    implied_flag_values: dict[str, frozenset[Any]] = field(default_factory=dict)
+    # The node REQUIRES one of `image_params` (image-to-video). Such a model is
+    # only a retry suggestion when the request already carries an image;
+    # `test_emit_model_variants.py` holds this flag to the recorded catalog.
+    image_required: bool = False
+
+
+# Schema default (snapshot 2026-07) of the Gemini image nodes' system_prompt;
+# execute() falls back to "" but the UI serializes this steering prompt, so
+# match it.
+_GEMINI_SYSTEM_PROMPT = (
+    "You are an expert image-generation engine. You must ALWAYS produce an image.\n"
+    "Interpret all user input—regardless of format, intent, or abstraction—as literal "
+    "visual directives for image composition.\n"
+    "If a prompt is conversational or lacks specific visual details, you must creatively "
+    "invent a concrete visual scenario that depicts the concept.\n"
+    "Prioritize generating the visual representation above any text, formatting, or "
+    "conversational requests."
+)
 
 
 # proxy model alias → partner node spec. Param keys are the *generate* flag
@@ -117,19 +156,34 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
             "seed": 42,
             "aspect_ratio": "auto",
             "response_modalities": "IMAGE+TEXT",
-            # Schema default (snapshot 2026-07); the node's execute() falls back
-            # to "" but the UI serializes this steering prompt, so match it.
-            "system_prompt": (
-                "You are an expert image-generation engine. You must ALWAYS produce an image.\n"
-                "Interpret all user input—regardless of format, intent, or abstraction—as literal "
-                "visual directives for image composition.\n"
-                "If a prompt is conversational or lacks specific visual details, you must creatively "
-                "invent a concrete visual scenario that depicts the concept.\n"
-                "Prioritize generating the visual representation above any text, formatting, or "
-                "conversational requests."
-            ),
+            "system_prompt": _GEMINI_SYSTEM_PROMPT,
         },
         output="IMAGE",
+        model_variants={
+            # Nano Banana Pro. Node: GeminiImage2Node — the only class whose
+            # `model` combo offers it.
+            "gemini-3-pro-image-preview": NodeSpec(
+                node_class="GeminiImage2Node",
+                endpoint="vertexai/gemini/{model}",
+                param_map={
+                    "prompt": "prompt",
+                    "model": "model",
+                    "seed": "seed",
+                    "aspect_ratio": "aspect_ratio",
+                    "resolution": "resolution",
+                },
+                image_params={"image": "images", "images": "images"},
+                fixed={
+                    "model": "gemini-3-pro-image-preview",
+                    "seed": 42,
+                    "aspect_ratio": "auto",
+                    "resolution": "1K",
+                    "response_modalities": "IMAGE+TEXT",
+                    "system_prompt": _GEMINI_SYSTEM_PROMPT,
+                },
+                output="IMAGE",
+            ),
+        },
     ),
     # ByteDance Seedance image-to-video. Node: ByteDanceImageToVideoNode.
     "seedance": NodeSpec(
@@ -150,6 +204,7 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
             "generate_audio": "generate_audio",
         },
         image_params={"image": "image"},
+        image_required=True,
         fixed={
             "model": "seedance-1-0-pro-fast-251015",
             "resolution": "720p",
@@ -195,6 +250,7 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
         # --emit-workflow still sends it straight to the proxy.
         fixed={"model": "Flux.2 [pro]", "model.width": 1024, "model.height": 768, "seed": 0},
         output="IMAGE",
+        implied_flag_values={"output_format": frozenset({"png"})},
     ),
     # BFL Flux 1.1 [pro] Ultra (text-to-image). Node: FluxProUltraImageNode.
     # The node takes an `aspect_ratio` string where the proxy schema takes
@@ -205,6 +261,12 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
         param_map={
             "prompt": "prompt",
             "seed": "seed",
+            # The endpoint takes these directly (no width/height); each is the
+            # same-named widget on the node.
+            "aspect_ratio": "aspect_ratio",
+            "raw": "raw",
+            "prompt_upsampling": "prompt_upsampling",
+            "image_prompt_strength": "image_prompt_strength",
         },
         # `image_prompt_strength` is schema-optional but positionally required by
         # execute(); the emitted node must carry every widget input. Default from
@@ -233,6 +295,7 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
             "duration": "duration",
         },
         image_params={"image": "start_frame", "start_frame": "start_frame"},
+        image_required=True,
         fixed={
             "negative_prompt": "",
             "model_name": "kling-v2-master",
@@ -246,11 +309,9 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
 }
 
 
-# Core scaffolding `build_workflow` mints itself, exempt on the same grounds a
-# NodeSpec entry can be: the class is chosen here, not guessed. ImageBatch has
-# carried DEPRECATED since ComfyUI v0.35.0 — BatchImagesNode replaces it, but
-# folding the chain over changes emitted output, so that is its own change.
-_CORE_DEPRECATED_OK = frozenset({"ImageBatch"})
+# BatchImagesNode's autogrow group: template "image", prefix "image", max 50
+# (ComfyUI comfy_extras/nodes_post_processing.py, and cloud's object_info).
+_BATCH_IMAGES_MAX = 50
 
 
 def supported_models() -> list[str]:
@@ -290,10 +351,38 @@ def node_class_for(model: str) -> str | None:
     return found[1].node_class if found else None
 
 
-def _resolve_model(model: str) -> tuple[str, NodeSpec]:
+def _endpoint_kind(endpoint_id: str) -> tuple[str, str] | None:
+    """(partner, "IMAGE" | "VIDEO") for a curated endpoint id, or None when the
+    catalog does not list it. Read off the static allowlist — no spec load."""
+    for eid, category, _polling in spec._ENDPOINT_ALLOWLIST:
+        if eid == endpoint_id:
+            media = "VIDEO" if category.endswith("video") or category in {"video-extend", "lipsync"} else "IMAGE"
+            return eid.split("/", 1)[0], media
+    return None
+
+
+def suggested_models(model: str, values: dict[str, Any] | None = None) -> list[str]:
+    """Emittable aliases producing the same media as ``model``, same partner
+    first — what to retry with when ``model`` itself has no node. A model whose
+    node requires an image is left out unless ``values`` already carries one:
+    swapping only the model name would emit a graph that cannot run."""
+    kind = _endpoint_kind(spec.resolve_alias(model))
+    if kind is None:
+        return []
+    partner, media = kind
+    values = values or {}
+
+    def runnable(ns: NodeSpec) -> bool:
+        return not ns.image_required or any(values.get(flag) is not None for flag in ns.image_params)
+
+    same = [a for a in supported_models() if MODEL_NODE_MAP[a].output == media and runnable(MODEL_NODE_MAP[a])]
+    return sorted(same, key=lambda a: (MODEL_NODE_MAP[a].endpoint.split("/", 1)[0] != partner, a))
+
+
+def _resolve_model(model: str, values: dict[str, Any] | None = None) -> tuple[str, NodeSpec]:
     found = _lookup_model(model)
     if found is None:
-        raise UnsupportedModelError(model, supported_models())
+        raise UnsupportedModelError(model, supported_models(), suggested_models(model, values))
     return found
 
 
@@ -303,10 +392,11 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
     ``values`` are the parsed ``--param`` values (same dict the proxy client
     receives). Local-file image params are materialized as ``LoadImage`` nodes
     and wired into the partner node; scalar params override the node's fixed
-    defaults. A ``SaveImage``/``SaveVideo`` is appended so ``comfy run`` writes
+    defaults. A ``SaveImageAdvanced``/``SaveVideo`` is appended so ``comfy run`` writes
     the result to disk.
     """
-    _alias, ns = _resolve_model(model)
+    _alias, ns = _resolve_model(model, values)
+    ns = ns.model_variants.get(values.get("model"), ns)
 
     node_inputs: dict[str, Any] = dict(ns.fixed)
 
@@ -319,6 +409,13 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
         if raw is None:
             continue
         paths = [str(Path(p).expanduser()) for p in (raw if isinstance(raw, list | tuple) else [raw])]
+        if not paths:
+            raise EmitError(f"--emit-workflow for {model!r} got an empty list for --{flag}; pass at least one file.")
+        if len(paths) > _BATCH_IMAGES_MAX:
+            raise EmitError(
+                f"--emit-workflow for {model!r} takes at most {_BATCH_IMAGES_MAX} files for --{flag} "
+                f"(the BatchImagesNode limit); got {len(paths)}."
+            )
         loader_ids: list[str] = []
         for path in paths:
             loader_id = str(next_id)
@@ -329,20 +426,21 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
                 "inputs": {"image": path},
             }
             loader_ids.append(loader_id)
-        # One file wires straight in; several fold through chained core
-        # ImageBatch nodes (2-input, always present) so the partner still
-        # receives a single IMAGE stream.
-        upstream, upstream_out = loader_ids[0], 0
-        for lid in loader_ids[1:]:
-            batch_id = str(next_id)
-            next_id += 1
-            workflow[batch_id] = {
-                "class_type": "ImageBatch",
-                "_meta": {"title": "batch reference images"},
-                "inputs": {"image1": [upstream, upstream_out], "image2": [lid, 0]},
-            }
-            upstream, upstream_out = batch_id, 0
-        node_inputs[node_key] = [upstream, upstream_out]
+        # One file wires straight in; several fold through ONE core
+        # BatchImagesNode, one autogrow slot per file in order, so the partner
+        # still receives a single IMAGE stream. Not ImageBatch: ComfyUI has
+        # flagged that 2-input class DEPRECATED since v0.35.0.
+        if len(loader_ids) == 1:
+            node_inputs[node_key] = [loader_ids[0], 0]
+            continue
+        batch_id = str(next_id)
+        next_id += 1
+        workflow[batch_id] = {
+            "class_type": "BatchImagesNode",
+            "_meta": {"title": "batch reference images"},
+            "inputs": {f"images.image{i}": [lid, 0] for i, lid in enumerate(loader_ids)},
+        }
+        node_inputs[node_key] = [batch_id, 0]
 
     # Scalar params → node inputs, honoring the explicit param_map.
     for flag, node_key in ns.param_map.items():
@@ -373,6 +471,7 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
     # (flux-2's `input_image` into `model.images`). Either way the emitted graph
     # would ignore the flag, so the error names the mapping, not the node.
     handled = set(ns.param_map) | set(ns.image_params)
+    handled |= {flag for flag, implied in ns.implied_flag_values.items() if values.get(flag) in implied}
     if ns.aspect_from_wh:
         handled |= {"width", "height"}
     unsupported = sorted(flag for flag, value in values.items() if value is not None and flag not in handled)
@@ -406,9 +505,13 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
         }
     else:
         workflow[save_id] = {
-            "class_type": "SaveImage",
+            "class_type": "SaveImageAdvanced",
             "_meta": {"title": "save generated image"},
-            "inputs": {"images": ["1", ns.media_port], "filename_prefix": output_prefix},
+            "inputs": {
+                "images": ["1", ns.media_port],
+                "filename_prefix": output_prefix,
+                "format": "png",
+            },
         }
     return workflow
 
@@ -464,7 +567,7 @@ def ops_from_api_workflow(api_wf: dict[str, Any], graph: Any, model: str) -> lis
     del graph  # structural mapping today; see docstring
     node_ids = {str(k) for k in api_wf}
     _alias, ns = _resolve_model(model)
-    deprecated_ok = ({ns.node_class} if ns.deprecated_ok else set()) | _CORE_DEPRECATED_OK
+    deprecated_ok = {ns.node_class} if ns.deprecated_ok else set()
 
     def alias(nid: Any) -> str:
         return f"gen{nid}"
@@ -521,12 +624,22 @@ def write_frontend_workflow(
     actor: str = "cli",
     base_version: int = 0,
     output_prefix: str = "generate",
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]] | None, str | None]:
     """Build the workflow for ``model`` as a FRONTEND-format graph and write it
-    to ``path``; return ``(workflow, ops)`` where ``ops`` is the stamped
-    ``replace_ops`` batch that turns whatever ``path`` previously held into the
-    new graph (empty previous ⇒ no delete half), ready for the envelope exactly
-    like ``templates fetch --emit-ops``.
+    to ``path``; return ``(workflow, ops, ops_skipped)`` where ``ops`` is the
+    stamped ``replace_ops`` batch that turns whatever ``path`` previously held
+    into the new graph (empty previous ⇒ no delete half), ready for the envelope
+    exactly like ``templates fetch --emit-ops``.
+
+    ``ops`` is ``None`` with ``ops_skipped`` set when the batch cannot be minted.
+    That is NOT a failure of the request — the file is written either way, and a
+    consumer falls back to the whole-document path it had before ops existed,
+    exactly as ``templates fetch --emit-ops`` does. The reason it can happen at
+    all is the PREVIOUS document: ``replace_ops`` emits a ``delete_node`` per
+    node already at ``path``, so a target that holds a large workflow can push
+    the batch past the 1,024-op bound even though the graph being written is
+    tiny. That is ordinary user data, not a bug in the built graph, so failing
+    the whole command over it would discard a workflow that is perfectly good.
 
     Raises ``EmitError``/``UnsupportedModelError`` like :func:`write_workflow`;
     an applier failure surfaces as ``EmitError`` (the request itself was
@@ -568,10 +681,20 @@ def write_frontend_workflow(
     # `replace_ops` so the returned workflow, the file and the batch describe
     # one document.
     workflow_ops.strip_internal(workflow)
+    ops: list[dict[str, Any]] | None = None
+    ops_skipped: str | None = None
     try:
         ops = workflow_ops.replace_ops(previous, workflow, actor=actor, base_version=base_version)
-    except workflow_ops.NotExpressibleError as e:  # can't-happen for our own built graph; fail loudly if it does
-        raise EmitError(f"the {model!r} workflow cannot be expressed as ops: {e}") from e
+    except workflow_ops.NotExpressibleError as e:
+        # Non-fatal, like `templates fetch --emit-ops`: the workflow itself is
+        # fine and still gets written. This used to be commented as can't-happen
+        # for our own built graph, and for the STRUCTURAL reason it is — but the
+        # batch also counts a `delete_node` per node already at `path`, which is
+        # user data, so a large existing file could fail the whole command and
+        # write nothing. The umbrella `emit_workflow_failed` hint then told the
+        # caller to check the model name and its required inputs, for a failure
+        # neither of them caused.
+        ops_skipped = str(e)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(workflow, indent=2) + "\n", encoding="utf-8")
-    return workflow, ops
+    return workflow, ops, ops_skipped

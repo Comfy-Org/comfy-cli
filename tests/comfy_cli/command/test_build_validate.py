@@ -1,16 +1,30 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
+import threading
+import time
+import urllib.error
+from email.message import Message
 from pathlib import Path
 
+import jsonschema
 import pytest
 from build_validate_support import ResolveRecorder, local_model, local_node, remote_model, write_spec
 from typer.testing import CliRunner
 
+from comfy_cli import error_codes
 from comfy_cli.cmdline import app as cli_app
 from comfy_cli.command import build
 from comfy_cli.command.build_spec import JsonObject
+from comfy_cli.command.build_validation import (
+    HIDDEN_LINK_LABEL,
+    _https_url,
+    _lacks_extension,
+    _valid_filename,
+    _valid_model_dir,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -314,3 +328,969 @@ def test_pretty_remote_output_keeps_none_and_lookup_errors_distinct(
     assert result.exit_code == 0, result.output
     assert "none_found" in result.stdout
     assert "lookup_error" in result.stdout
+
+
+#: Model entries as people paste them from Civitai or Hugging Face, each breaking
+#: one rule of the builder's release cut.
+PASTED_MODELS: list[JsonObject] = [
+    {"type": "Loras", "sourceUri": "https://h.example/a.safetensors"},
+    {"type": "loras", "sourceUri": "https://civitai.com/api/download/models/128713"},
+    {"type": "loras", "filename": "add_detail (v1.1).safetensors", "sourceUri": "https://h.example/b.safetensors"},
+    {"type": "loras", "sha256": "8A0B5F4C2E", "sourceUri": "https://h.example/c.safetensors"},
+]
+
+
+def _refused(result) -> dict[str, str]:
+    """The refused entries, as the model each names to the rule it breaks."""
+    error = _envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid", error
+    return {issue["model"]: issue["field"].rsplit(".", 1)[1] for issue in error["details"]["invalid"]}
+
+
+def test_validate_names_every_model_entry_the_builder_would_refuse(workspace: Path) -> None:
+    """Offline it cannot know the builder's folders, so a case variant waits for the
+    save; the rest are named together, before anything is uploaded."""
+    # Given
+    write_spec(workspace, models=PASTED_MODELS, nodes=[])
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    assert _refused(result) == {
+        "https://civitai.com/api/download/models/128713": "filename",
+        "add_detail (v1.1).safetensors": "filename",
+        "https://h.example/c.safetensors": "sha256",
+    }
+    assert _envelope(result)["error"]["message"].startswith("3 problems the builder would refuse this build for:")
+
+
+def test_remote_validate_also_names_a_case_variant_of_a_folder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    write_spec(workspace, models=PASTED_MODELS, nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then
+    assert result.exit_code == 1
+    assert _refused(result)["https://h.example/a.safetensors"] == "type"
+    assert len(_refused(result)) == 4
+    assert recorder.calls == [], "a refused spec looks nothing up"
+
+
+def test_pretty_validate_prints_each_problem_on_its_own_line(workspace: Path) -> None:
+    # Given
+    write_spec(workspace, models=PASTED_MODELS, nodes=[])
+
+    # When
+    result = _invoke(workspace, output="pretty")
+
+    # Then
+    assert result.exit_code == 1
+    lines = [line.strip("│ ") for line in result.output.splitlines()]
+    assert sum(line.startswith("definition.models[") for line in lines) == 3, result.output
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param({"type": "ipadapter/custom", "blobId": "blob-1"}, id="a-new-folder"),
+        pytest.param(
+            {"type": "loras", "filename": "ok.safetensors", "sourceUri": "https://civitai.com/api/download/models/1"},
+            id="a-link-with-a-filename",
+        ),
+        pytest.param(
+            {"type": "loras", "sourceUri": "https://h.example/x.safetensors", "sha256": "A" * 64}, id="upper-hex"
+        ),
+        pytest.param(
+            {"type": "loras", "sourceUri": "https://h.example/x.safetensors", "sha256": f" {'a' * 64}\n"},
+            id="padded-sha256",
+        ),
+        pytest.param(
+            {"type": "loras", "filename": "  ", "sourceUri": "https://h.example/x.safetensors"}, id="blank-filename"
+        ),
+        pytest.param(
+            {"type": "loras", "sourceUri": "https://h.example/x.safetensors", "sha256": ""}, id="empty-sha256"
+        ),
+    ],
+)
+def test_validate_passes_what_the_builder_accepts(workspace: Path, model: JsonObject) -> None:
+    # Given
+    write_spec(workspace, models=[model], nodes=[])
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+
+
+def test_a_local_models_sha256_is_left_to_the_push(workspace: Path) -> None:
+    """Push hashes a local model and replaces its sha256, so a stale one refuses nothing."""
+    # Given
+    write_spec(workspace, models=[local_model(sha256="a")], nodes=[])
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+
+
+#: Links with the builder's answer for each: (``validHTTPSURL``, ``derivedFilenameLacksExt``).
+#: Every row was checked against those two Go functions, copied verbatim from
+#: comfy-builder's definition.go and run under go1.26.4. The builder reads a link
+#: with Go's ``url.Parse``, which decodes the path and refuses some links Python's
+#: ``urlsplit`` takes.
+BUILDER_LINK_ANSWERS = [
+    pytest.param("https://h.example/x.safetensors", True, False, id="plain"),
+    pytest.param("https://civitai.com/api/download/models/128713", True, True, id="civitai-id"),
+    pytest.param("https://h.example/m%2Esafetensors", True, False, id="escaped-dot-is-an-extension"),
+    pytest.param("https://h.example/model.safetensors%2F123", True, True, id="escaped-slash-ends-the-name"),
+    pytest.param("https://h.example/a%20b.safetensors", True, False, id="escaped-space"),
+    pytest.param("https://h.example/100%.safetensors", False, False, id="bad-escape"),
+    pytest.param("https://h.example/x.safetensors#100%", False, False, id="bad-escape-in-fragment"),
+    pytest.param("https://h.example:abc/x.safetensors", False, False, id="port-not-a-number"),
+    pytest.param("https://h.example:8443/x.safetensors", True, False, id="port"),
+    pytest.param("https://h.example:1:2/x.safetensors", False, False, id="two-ports"),
+    pytest.param("https://h.example/a\tb.safetensors", False, False, id="tab"),
+    pytest.param("\x1fhttps://h.example/x.safetensors", False, False, id="control-char-str-strip-drops"),
+    pytest.param("https://h.example/x.safetensors#frag\x01", True, False, id="control-char-in-fragment"),
+    pytest.param("  https://h.example/x.safetensors\n", True, False, id="surrounding-space"),
+    pytest.param("HTTPS://h.example/x.safetensors", True, False, id="scheme-case"),
+    pytest.param("http://h.example/x.safetensors", False, False, id="http"),
+    pytest.param("https:h.example/x.safetensors", False, False, id="opaque"),
+    pytest.param("https:models/128713", False, False, id="opaque-has-no-path"),
+    pytest.param("https:///x.safetensors", False, False, id="no-host"),
+    pytest.param("https://h ex.example/x.safetensors", False, False, id="space-in-host"),
+    pytest.param("https://%41.example/x.safetensors", False, False, id="ascii-escape-in-host"),
+    pytest.param("https://us er@h.example/x.safetensors", False, False, id="space-in-userinfo"),
+    pytest.param("https://[::1]/x.safetensors", True, False, id="ipv6"),
+    pytest.param("https://[1.2.3.4]/x.safetensors", False, False, id="ipv4-in-brackets"),
+    pytest.param("https://h.example", True, False, id="no-path"),
+    pytest.param("https://h.example/models/", True, True, id="trailing-slash"),
+    pytest.param("https://h.example/x.safetensors/", True, False, id="trailing-slash-after-a-name"),
+    pytest.param("https://h.example/dl?file=x.safetensors", True, True, id="name-in-query"),
+    pytest.param("//h.example/model", False, True, id="no-scheme-with-a-host"),
+    pytest.param("models/128713", False, True, id="no-scheme-relative-path"),
+    pytest.param("/model", False, True, id="no-scheme-absolute-path"),
+    pytest.param("///models/128713", False, True, id="no-scheme-three-slashes-is-all-path"),
+    pytest.param("https:x", False, False, id="opaque-short"),
+    pytest.param("1h:80/model", False, False, id="no-scheme-colon-in-first-segment"),
+    pytest.param("https://localhost", True, False, id="host-with-no-dot-and-no-path"),
+    pytest.param("https://h.example:abc/model", False, False, id="bad-port-before-a-bare-name"),
+    pytest.param("https://u:p@h.example/model", True, True, id="userinfo"),
+    pytest.param("https://us er@h.example/model", False, False, id="bad-userinfo-before-a-bare-name"),
+    pytest.param("https://u%zz@h.example/model", False, False, id="bad-escape-in-userinfo"),
+    pytest.param("https://h[x.example/model", False, False, id="bracket-inside-a-host"),
+    pytest.param("https://[::1]:8443/model", True, True, id="ipv6-with-port"),
+    pytest.param("https://[::1]:x/model", False, False, id="ipv6-bad-port"),
+    pytest.param("https://[::1]x/model", False, False, id="ipv6-junk-after-the-bracket"),
+    pytest.param("https://[::1/model", False, False, id="ipv6-unclosed"),
+    pytest.param("https://[fe80::1%25en0]/model", True, True, id="ipv6-zone"),
+    pytest.param("https://[fe80::1%25en0]:8443/model", True, True, id="ipv6-zone-with-port"),
+    pytest.param("https://[fe80::1%25]/model", False, False, id="ipv6-empty-zone"),
+    pytest.param("https://[fe80::1%25en%200]/model", True, True, id="ipv6-zone-escaped-space"),
+    pytest.param("https://[fe80::1%25en%2F0]/model", False, False, id="ipv6-zone-escaped-slash"),
+    pytest.param("https://[fe80::1%en0]/model", False, False, id="ipv6-zone-unescaped-percent"),
+    pytest.param("https://[fe%3A80::1]/model", False, False, id="ipv6-escape-before-the-zone"),
+    pytest.param("https://h%zz.example/model", False, False, id="bad-escape-in-host"),
+    pytest.param("https://h%4/model", False, False, id="short-escape-in-host"),
+    pytest.param("https://h%C3%A9.example/model", True, True, id="non-ascii-escape-in-host"),
+    pytest.param("https://h%25.example/model", True, True, id="escaped-percent-in-host"),
+    pytest.param("https://h.example:/model", True, True, id="empty-port"),
+    pytest.param("https://h.example:1:2/model", False, False, id="https-port-ends-at-the-first-colon"),
+    pytest.param("http://h.example:1:2/model", False, False, id="http-port-ends-at-the-first-colon"),
+    pytest.param("ftp://h.example:1:2/model", False, True, id="other-scheme-port-ends-at-the-last-colon"),
+    pytest.param("ftp://h.example:abc/model", False, False, id="other-scheme-bad-port"),
+]
+
+
+@pytest.mark.parametrize(("uri", "https", "lacks_extension"), BUILDER_LINK_ANSWERS)
+def test_links_read_as_the_builder_reads_them(uri: str, https: bool, lacks_extension: bool) -> None:
+    assert (_https_url(uri), _lacks_extension(uri)) == (https, lacks_extension)
+
+
+@pytest.mark.parametrize(
+    ("uri", "field"),
+    [
+        pytest.param("https://h.example/m%2Esafetensors", None, id="escaped-dot"),
+        pytest.param("https://h.example/model.safetensors%2F123", "filename", id="escaped-slash"),
+        pytest.param("https://h.example/100%.safetensors", "sourceUri", id="bad-escape"),
+    ],
+)
+def test_validate_answers_a_link_as_the_builder_would(workspace: Path, uri: str, field: str | None) -> None:
+    # Given
+    write_spec(workspace, models=[{"type": "loras", "sourceUri": uri}], nodes=[])
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    if field is None:
+        assert result.exit_code == 0, result.stdout
+    else:
+        assert result.exit_code == 1
+        assert _refused(result) == {uri: field}
+
+
+#: Values Python's ``str.strip`` reads as blank and Go's ``strings.TrimSpace`` does
+#: not (\x1c-\x1f), each with the field the builder refuses, as ``definition.go``
+#: ``validateModels`` answers it under go1.26.4.
+@pytest.mark.parametrize(
+    ("model", "field"),
+    [
+        pytest.param(
+            {"type": "loras", "sourceUri": "https://h.example/x.safetensors", "sha256": "a" * 64 + "\x1c"},
+            "sha256",
+            id="sha256-with-a-separator",
+        ),
+        pytest.param(
+            {"type": "loras", "filename": "\x1f", "sourceUri": "https://h.example/x.safetensors"},
+            "filename",
+            id="filename-of-a-separator",
+        ),
+        pytest.param(
+            {"type": "loras", "filename": "x.safetensors", "sourceUri": "\x1c"},
+            "sourceUri",
+            id="link-of-a-separator",
+        ),
+    ],
+)
+def test_the_rules_trim_as_the_builder_does(workspace: Path, model: JsonObject, field: str) -> None:
+    # Given
+    write_spec(workspace, models=[model], nodes=[])
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    assert list(_refused(result).values()) == [field]
+
+
+@pytest.mark.parametrize("output", ["json", "pretty"])
+def test_a_refused_link_is_named_without_its_credentials(workspace: Path, output: str) -> None:
+    """A link names an entry that has no filename, and a signed link or a Civitai
+    ``?token=`` carries a credential that must not reach a terminal or a CI log."""
+    # Given
+    link = "https://me:hunter2@civitai.com/api/download/models/1?token=s3cr3t&type=Model#part"
+    write_spec(workspace, models=[{"type": "loras", "sourceUri": link}], nodes=[])
+
+    # When
+    result = _invoke(workspace, output=output)
+
+    # Then
+    assert result.exit_code == 1
+    assert "definition.models[0].filename" in result.output
+    for secret in ("hunter2", "s3cr3t", "type=Model", "#part"):
+        assert secret not in result.output
+    if output == "json":
+        assert _refused(result) == {"https://civitai.com/api/download/models/1": "filename"}
+
+
+@pytest.mark.parametrize("output", ["json", "pretty"])
+@pytest.mark.parametrize(
+    ("link", "secrets", "label"),
+    [
+        pytest.param(
+            "https://alice:s3cr/et+tok@host.example/m.safetensors",
+            ("alice", "s3cr", "et+tok"),
+            "…/m.safetensors",
+            id="slash-in-the-password",
+        ),
+        pytest.param(
+            "https://alice:s3cr?et@host.example/m.safetensors",
+            ("alice", "s3cr", "et@"),
+            HIDDEN_LINK_LABEL,
+            id="question-mark-in-the-password",
+        ),
+        pytest.param(
+            "https://alice:s3cr#et@host.example/m.safetensors",
+            ("alice", "s3cr", "et@"),
+            HIDDEN_LINK_LABEL,
+            id="hash-in-the-password",
+        ),
+        pytest.param(
+            "https://bob:Pq7?Zr8#Wk9/Xy6@host.example/m.safetensors",
+            ("bob", "Pq7", "Zr8", "Wk9", "Xy6"),
+            HIDDEN_LINK_LABEL,
+            id="question-mark-and-hash-in-the-password",
+        ),
+        pytest.param(
+            # Go parses this one: host alice, port 8841, path /Zk9x@host.example/...
+            "https://alice:8841/Zk9x@host.example/m.safetensors",
+            ("alice", ":8841", "Zk9x"),
+            "…/m.safetensors",
+            id="password-go-reads-as-a-port",
+        ),
+        pytest.param(
+            "https://host.example/m.safetensors?sig=Ab3@Zk9q",
+            ("sig=", "Ab3", "Zk9q"),
+            HIDDEN_LINK_LABEL,
+            id="at-in-the-query",
+        ),
+        pytest.param(
+            "https://alice:s3cret@host.example/dir/m.safetensors?token=T0kn#frag",
+            ("alice", "s3cret", "T0kn", "frag"),
+            "https://host.example/dir/m.safetensors",
+            id="a-link-that-parses",
+        ),
+    ],
+)
+def test_a_model_label_never_shows_a_links_credentials(
+    workspace: Path, link: str, secrets: tuple[str, ...], label: str, output: str
+) -> None:
+    """A password pasted as is (a base64 token holds '/', and may hold '?' or '#')
+    makes a link Go cannot parse, or parses as something else; the label names no
+    part of it, and still shows the scheme, host and path of a link that parses. A
+    hidden link is named by the file after its last '@', unless a '?' or '#' before
+    that '@' may have started a query it sits in."""
+    # Given
+    write_spec(workspace, models=[{"type": "loras", "sourceUri": link, "sha256": "nope"}], nodes=[])
+
+    # When
+    result = _invoke(workspace, output=output)
+
+    # Then
+    assert result.exit_code == 1, result.output
+    said = "".join(result.output.split())
+    for secret in secrets:
+        assert secret not in said, result.output
+    assert "".join(label.split()) in said
+    if output == "json":
+        issues = _envelope(result)["error"]["details"]["invalid"]
+        assert {issue["model"] for issue in issues} == {label}
+
+
+@pytest.mark.parametrize("output", ["json", "pretty"])
+def test_hidden_links_still_name_their_models_apart(workspace: Path, output: str) -> None:
+    """A jsDelivr ``@version`` path puts an '@' after the first '/', so the link is
+    not shown; each model is still named by the file its link points at, as
+    ``models[n]`` counts the sorted spec and a JSON consumer keys by ``model``."""
+    # Given
+    write_spec(
+        workspace,
+        models=[
+            {"type": "loras", "sourceUri": "https://cdn.jsdelivr.net/gh/team/loras@v1/a.safetensors", "sha256": "no"},
+            {"type": "loras", "sourceUri": "https://cdn.jsdelivr.net/gh/team/loras@v1/b", "sha256": "a" * 64},
+        ],
+        nodes=[],
+    )
+
+    # When
+    result = _invoke(workspace, output=output)
+
+    # Then
+    assert result.exit_code == 1, result.output
+    said = "".join(result.output.split())
+    assert "".join(HIDDEN_LINK_LABEL.split()) not in said
+    assert "…/a.safetensors" in said
+    assert "(…/b)" in said or '"…/b"' in said
+    if output == "json":
+        issues = _envelope(result)["error"]["details"]["invalid"]
+        assert {issue["model"]: issue["field"].rsplit(".", 1)[-1] for issue in issues} == {
+            "…/a.safetensors": "sha256",
+            "…/b": "filename",
+        }
+
+
+def test_a_refused_link_is_named_without_its_fragment(workspace: Path) -> None:
+    # Given
+    write_spec(
+        workspace, models=[{"type": "loras", "sourceUri": "https://civitai.com/api/download/models/1#part"}], nodes=[]
+    )
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    assert _refused(result) == {"https://civitai.com/api/download/models/1": "filename"}
+
+
+def test_a_blank_filename_does_not_name_a_link_with_no_extension(workspace: Path) -> None:
+    """The builder trims the filename first, so blank is no filename at all."""
+    # Given
+    link = "https://civitai.com/api/download/models/1"
+    write_spec(workspace, models=[{"type": "loras", "filename": " \t", "sourceUri": link}], nodes=[])
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    (issue,) = _envelope(result)["error"]["details"]["invalid"]
+    assert (issue["field"], issue["reason"]) == (
+        "definition.models[0].filename",
+        "sourceUri has no file extension; set an explicit filename",
+    )
+
+
+#: The builder's vetted folders as the tests' list carries them.
+DIRECTORIES = frozenset({"checkpoints", "loras", "vae"})
+
+
+#: Each row checked against Go ``common.ValidModelDir`` (whose own list holds these
+#: three), imported from the cloud repo and run under go1.26.4.
+@pytest.mark.parametrize(
+    ("value", "valid"),
+    [
+        pytest.param("loras", True, id="vetted"),
+        pytest.param("Loras", False, id="case-variant"),
+        pytest.param("LORAS", False, id="case-variant-upper"),
+        pytest.param("ipadapter/custom", True, id="new-folder"),
+        pytest.param("insightface/models/antelopev2", True, id="nested"),
+        pytest.param("configs", False, id="reserved-configs"),
+        pytest.param("CONFIGS/x", False, id="reserved-configs-any-case"),
+        pytest.param("custom_nodes", False, id="reserved-custom-nodes"),
+        pytest.param("Custom_Nodes/foo", False, id="reserved-custom-nodes-any-case"),
+        pytest.param("foo./bar", False, id="trailing-dot-segment"),
+        pytest.param("con", False, id="windows-device"),
+        pytest.param("aux.x", False, id="windows-device-with-extension"),
+        pytest.param("lpt9.bin", False, id="windows-lpt"),
+        pytest.param("com0", True, id="not-a-windows-device"),
+        pytest.param("a b", False, id="space"),
+        pytest.param("-lead", False, id="leading-dash"),
+        pytest.param("a//b", False, id="empty-segment"),
+        pytest.param("/abs", False, id="absolute"),
+        pytest.param("../x", False, id="parent"),
+        pytest.param("a" * 127 + "/" + "a" * 127, True, id="255-chars"),
+        pytest.param("a" * 127 + "/" + "a" * 128, False, id="too-long"),
+        pytest.param("", False, id="empty"),
+    ],
+)
+def test_model_directories_as_the_builder_reads_them(value: str, valid: bool) -> None:
+    assert _valid_model_dir(value, DIRECTORIES) is valid
+
+
+def test_a_case_variant_passes_without_the_builders_list() -> None:
+    """Offline there is no list to tell "Loras" from a new folder, so it is left to
+    the save, which warns about it; the builder itself refuses it."""
+    assert _valid_model_dir("Loras", None) is True
+    assert _valid_model_dir("Loras", DIRECTORIES) is False
+
+
+#: Each row checked against Go ``definition.ValidFilename``, under go1.26.4.
+@pytest.mark.parametrize(
+    ("value", "valid"),
+    [
+        pytest.param("x.safetensors", True, id="plain"),
+        pytest.param("a.b.c", True, id="dots"),
+        pytest.param("..", False, id="dot-dot"),
+        pytest.param("a..b", False, id="dot-dot-inside"),
+        pytest.param(".hidden", False, id="leading-dot"),
+        pytest.param("a/b", False, id="separator"),
+        pytest.param("a b", False, id="space"),
+        pytest.param("a" * 256, False, id="too-long"),
+    ],
+)
+def test_filenames_as_the_builder_reads_them(value: str, valid: bool) -> None:
+    assert _valid_filename(value) is valid
+
+
+def test_one_problem_is_counted_singular_and_names_its_model(workspace: Path) -> None:
+    # Given
+    write_spec(
+        workspace,
+        models=[{"type": "loras", "sha256": "8A0B5F4C2E", "sourceUri": "https://h.example/c.safetensors"}],
+        nodes=[],
+    )
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    assert _envelope(result)["error"]["message"] == (
+        "1 problem the builder would refuse this build for:\n"
+        "  definition.models[0].sha256 (https://h.example/c.safetensors): must be a 64-character sha256"
+    )
+
+
+def test_an_entry_with_nothing_to_name_it_by_has_no_parentheses(workspace: Path) -> None:
+    # Given
+    write_spec(workspace, models=[{"type": "Bad Folder", "blobId": "blob-1"}], nodes=[])
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    message = _envelope(result)["error"]["message"]
+    assert message.splitlines()[1] == "  definition.models[0].type: " + (
+        "must be a model directory under models/ (e.g. checkpoints, insightface/models/antelopev2)"
+    )
+
+
+def test_pretty_validate_leaves_the_problem_list_out_of_the_details(workspace: Path) -> None:
+    """Pretty mode already lists every problem in the message; the list is for JSON."""
+    # Given
+    write_spec(workspace, models=PASTED_MODELS, nodes=[])
+
+    # When
+    json_result = _invoke(workspace)
+    pretty_result = _invoke(workspace, output="pretty")
+
+    # Then
+    assert len(_envelope(json_result)["error"]["details"]["invalid"]) == 3
+    lines = [line.strip("│ ") for line in pretty_result.output.splitlines()]
+    assert any(line.startswith("path") for line in lines), pretty_result.output
+    assert not any(line.startswith("invalid") for line in lines), pretty_result.output
+
+
+#: What validate says when it did not check a folder's case.
+_FOLDER_CASE_UNCHECKED = "a folder's case (`Loras` for `loras`) was not checked"
+
+#: A case variant only the builder's list tells from a new folder.
+CASE_VARIANT: list[JsonObject] = [{"type": "Loras", "sourceUri": "https://h.example/a.safetensors"}]
+
+
+def _schema(name: str) -> JsonObject:
+    path = Path(__file__).parent.parent.parent.parent / "comfy_cli" / "schemas" / name
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_offline_validate_says_it_did_not_check_a_folders_case(workspace: Path) -> None:
+    """The builder refuses "Loras" at the release, so a pass that could not tell it
+    from a new folder says so, to a person and to an agent."""
+    # Given
+    write_spec(workspace, models=CASE_VARIANT, nodes=[])
+
+    # When
+    pretty = _invoke(workspace, output="pretty")
+    agent = _invoke(workspace)
+
+    # Then
+    assert pretty.exit_code == 0, pretty.output
+    assert _FOLDER_CASE_UNCHECKED in " ".join(pretty.output.split())
+    assert agent.exit_code == 0, agent.output
+    data = _envelope(agent)["data"]
+    assert data["folder_case_checked"] is False
+    jsonschema.Draft202012Validator(_schema("build_validate.json")).validate(data)
+
+
+def test_remote_validate_says_it_checked_a_folders_case(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", ResolveRecorder())
+    write_spec(workspace, models=[{"type": "loras", "sourceUri": "https://h.example/a.safetensors"}], nodes=[])
+
+    # When
+    pretty = _invoke(workspace, "--remote", token="tok_test", output="pretty")
+    agent = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then
+    assert pretty.exit_code == 0, pretty.output
+    assert _FOLDER_CASE_UNCHECKED not in " ".join(pretty.output.split())
+    assert _envelope(agent)["data"]["folder_case_checked"] is True
+
+
+def test_validate_without_models_says_nothing_of_a_folders_case(workspace: Path) -> None:
+    # Given
+    write_spec(workspace, models=[], nodes=[])
+
+    # When
+    pretty = _invoke(workspace, output="pretty")
+    agent = _invoke(workspace)
+
+    # Then
+    assert _FOLDER_CASE_UNCHECKED not in " ".join(pretty.output.split())
+    assert "folder_case_checked" not in _envelope(agent)["data"]
+
+
+@pytest.mark.parametrize(
+    "listed",
+    [
+        pytest.param({"directories": []}, id="empty-list"),
+        pytest.param({}, id="no-list"),
+        pytest.param({"directories": [1, 2]}, id="no-names"),
+        pytest.param({"directories": [""]}, id="an-empty-name"),
+        pytest.param({"directories": ["  "]}, id="a-blank-name"),
+    ],
+)
+def test_remote_validate_treats_a_list_naming_no_folder_as_unread(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, listed: JsonObject
+) -> None:
+    """A 200 that names no folder checks no case, so "Loras" passes as it does when
+    the read fails, and the command says so."""
+    # Given
+    recorder = ResolveRecorder()
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        if url == "https://builder.test/v1/model-directories":
+            return 200, listed
+        return recorder(url, target, method=method, body=body, timeout=timeout, max_bytes=max_bytes)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    write_spec(workspace, models=CASE_VARIANT, nodes=[])
+
+    # When
+    pretty = _invoke(workspace, "--remote", token="tok_test", output="pretty")
+    agent = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then
+    assert pretty.exit_code == 0, pretty.output
+    said = " ".join(pretty.output.split())
+    assert f"could not read the builder's model folders, so {_FOLDER_CASE_UNCHECKED}" in said
+    assert said.count(_FOLDER_CASE_UNCHECKED) == 1, pretty.output
+    assert agent.exit_code == 0, agent.output
+    assert _envelope(agent)["data"]["folder_case_checked"] is False
+
+
+def test_validate_warns_by_code_when_the_spec_sets_no_comfy_version(workspace: Path) -> None:
+    # Given
+    write_spec(workspace, models=[local_model()], nodes=[local_node()])
+
+    # When
+    agent = _invoke(workspace)
+    pretty = _invoke(workspace, output="pretty")
+
+    # Then
+    assert agent.exit_code == 0, agent.output
+    data = _envelope(agent)["data"]
+    assert [warning["code"] for warning in data["warnings"]] == ["build_comfy_version_missing"]
+    jsonschema.Draft202012Validator(_schema("build_validate.json")).validate(data)
+    assert pretty.exit_code == 0, pretty.output
+    assert "sets no ComfyUI version" in " ".join(pretty.output.split())
+
+
+_SHA_A = "a" * 64
+_SHA_B = "b" * 64
+#: What each link's host states on its redirect, as Hugging Face does; a link
+#: missing here does not answer.
+_STATED = {
+    "https://huggingface.co/org/repo/resolve/main/match.safetensors": f'"{_SHA_A}"',
+    "https://huggingface.co/org/repo/resolve/main/differs.safetensors": f'"{_SHA_B}"',
+}
+
+
+def _head(sent: list[tuple[str, str]]):
+    def no_redirect_urlopen(request, *, timeout: float):
+        sent.append((request.get_method(), request.full_url))
+        stated = _STATED.get(request.full_url)
+        if stated is None:
+            raise urllib.error.URLError("unreachable")
+        headers = Message()
+        headers["X-Linked-Etag"] = stated
+        raise urllib.error.HTTPError(request.full_url, 302, "redirect refused", headers, io.BytesIO())
+
+    return no_redirect_urlopen
+
+
+def test_remote_checks_a_declared_link_against_its_sha256_before_the_filename(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", _head(sent))
+    base = "https://huggingface.co/org/repo/resolve/main"
+    models: list[JsonObject] = [
+        {"type": "loras", "filename": name, "sourceUri": f"{base}/{name}", "sha256": _SHA_A}
+        for name in ("match.safetensors", "differs.safetensors", "silent.safetensors")
+    ]
+    write_spec(workspace, models=models, nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _envelope(result)["data"]
+    by_file = {lookup["filename"]: lookup for lookup in data["model_lookups"]}
+    assert by_file["match.safetensors"]["state"] == "declared_ok"
+    assert by_file["differs.safetensors"]["state"] == "declared_mismatch"
+    assert by_file["differs.safetensors"]["sourceSha256"] == _SHA_B
+    assert by_file["silent.safetensors"]["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["silent.safetensors"]}}]
+    assert {method for method, _ in sent} == {"HEAD"}
+    assert len(sent) == 3
+    jsonschema.Draft202012Validator(_schema("build_validate.json")).validate(data)
+
+
+def test_remote_takes_no_verdict_from_a_plain_etag_that_looks_like_a_sha256(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a host whose plain ETag is 64 hex characters (an opaque CDN token or
+    # a Xet root), not the file's sha256, and differs from the declared one
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    message = Message()
+    message["ETag"] = f'"{_SHA_B}"'
+
+    class Response:
+        headers = message
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", lambda request, *, timeout: Response())
+    uri = "https://cdn.example.com/org/repo/model.safetensors"
+    write_spec(
+        workspace,
+        models=[{"type": "loras", "filename": "model.safetensors", "sourceUri": uri, "sha256": _SHA_A}],
+        nodes=[],
+    )
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then: no declared verdict; the filename lookup answers, as before
+    assert result.exit_code == 0, result.stderr
+    (lookup,) = _envelope(result)["data"]["model_lookups"]
+    assert lookup["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["model.safetensors"]}}]
+
+
+def test_remote_never_sends_a_declared_link_that_is_not_https(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given: a source: local model keeps its sourceUri on the wire (no blobId), and
+    # the link rules skip a local entry, so a plain http link with a credential in
+    # its query reaches the hash probe
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", _head(sent))
+    uri = "http://civitai.example/api/download/models/1?token=secret"
+    write_spec(workspace, models=[local_model(sourceUri=uri, sha256=_SHA_A)], nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then: no request is opened for the link; the filename lookup answers
+    assert result.exit_code == 0, result.stderr
+    assert sent == []
+    (lookup,) = _envelope(result)["data"]["model_lookups"]
+    assert lookup["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["base.safetensors"]}}]
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        pytest.param("http://huggingface.co/org/repo/resolve/main/x.safetensors?token=secret", id="http"),
+        pytest.param("HTTP://huggingface.co/org/repo/resolve/main/x.safetensors", id="http-upper"),
+        pytest.param("ftp://files.example/x.safetensors", id="ftp"),
+        pytest.param("file:///etc/passwd", id="file"),
+        pytest.param("huggingface.co/org/repo/x.safetensors", id="no-scheme"),
+    ],
+)
+def test_a_link_that_is_not_https_is_never_opened(monkeypatch: pytest.MonkeyPatch, uri: str) -> None:
+    # Given
+    sent: list[str] = []
+
+    def no_redirect_urlopen(request, *, timeout: float):
+        sent.append(request.full_url)
+        raise AssertionError("opened a non-https link")
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", no_redirect_urlopen)
+
+    # When / Then
+    assert build._source_sha256(uri) is None
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "expected"),
+    [
+        pytest.param(302, {"X-Linked-Etag": f'"{_SHA_A.upper()}"'}, _SHA_A, id="hugging-face-redirect"),
+        pytest.param(200, {"ETag": f'W/"{_SHA_B}"'}, None, id="plain-etag-looks-like-sha256"),
+        pytest.param(200, {"ETag": '"d41d8cd98f00b204e9800998ecf8427e"'}, None, id="md5-etag"),
+        pytest.param(404, {"X-Linked-Etag": f'"{_SHA_A}"'}, None, id="not-found"),
+    ],
+)
+def test_a_links_stated_hash_is_read_only_when_it_is_a_sha256(
+    monkeypatch: pytest.MonkeyPatch, status: int, headers: dict[str, str], expected: str | None
+) -> None:
+    # Given
+    message = Message()
+    for name, value in headers.items():
+        message[name] = value
+
+    class Response:
+        def __init__(self) -> None:
+            self.headers = message
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    def no_redirect_urlopen(request, *, timeout: float):
+        assert request.get_method() == "HEAD"
+        if status == 200:
+            return Response()
+        raise urllib.error.HTTPError(request.full_url, status, "refused", message, io.BytesIO())
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", no_redirect_urlopen)
+
+    # When / Then
+    assert build._source_sha256("https://huggingface.co/org/repo/resolve/main/x.safetensors") == expected
+
+
+def test_link_checks_stop_at_their_time_budget_and_the_rest_get_the_filename_lookup(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: 40 models whose links all name hosts that never answer, each HEAD
+    # using its whole timeout on a fake clock
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    sent: list[float] = []
+
+    def dead_host(request, *, timeout: float):
+        sent.append(timeout)
+        clock[0] += timeout
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", dead_host)
+    names = [f"model-{index:02}.safetensors" for index in range(40)]
+    models: list[JsonObject] = [
+        {"type": "loras", "filename": name, "sourceUri": f"https://dead-{index}.example/{name}", "sha256": _SHA_A}
+        for index, name in enumerate(names)
+    ]
+    write_spec(workspace, models=models, nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then: the HEADs together took at most 15 seconds, the probes stopped
+    # once that was spent, and every model got the filename lookup
+    assert result.exit_code == 0, result.stderr
+    assert sum(sent) <= 15.0, sent
+    assert 0 < len(sent) < len(names)
+    assert sorted(name for call in recorder.calls for name in call["body"]["filenames"]) == names
+    lookups = _envelope(result)["data"]["model_lookups"]
+    assert {lookup["state"] for lookup in lookups} == {"none_found"}
+    assert f"{len(names) - len(sent)} models" in " ".join(result.stderr.split())
+
+
+def test_a_link_that_trickles_its_headers_is_cut_off_at_the_time_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given: hosts that keep each socket read inside its timeout but never finish
+    # the headers, so a per-read timeout alone would never fire; the budget is
+    # shrunk so the test runs fast
+    monkeypatch.setattr(build, "_SOURCE_HEAD_TIMEOUT", 0.2)
+    released = threading.Event()
+    opened: list[str] = []
+
+    def trickling_host(request, *, timeout: float):
+        opened.append(request.full_url)
+        released.wait(3.0)
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", trickling_host)
+    probe = build._SourceProbe(budget=0.5)
+    links = [f"https://slow-{index}.example/model.safetensors" for index in range(10)]
+
+    # When
+    started = time.monotonic()
+    try:
+        stated = [probe(link) for link in links]
+        elapsed = time.monotonic() - started
+    finally:
+        released.set()
+
+    # Then: the whole run stops near the budget, no link states a hash, and the
+    # links not asked are counted for the filename lookup
+    assert elapsed < 1.5, elapsed
+    assert stated == [None] * len(links)
+    assert 0 < len(opened) < len(links)
+    assert probe.skipped == len(links) - len(opened)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        pytest.param("https://TOKEN@models.example/x.safetensors", id="user"),
+        pytest.param("https://user:secret@models.example/x.safetensors", id="user-and-password"),
+        pytest.param("https://:secret@models.example/x.safetensors", id="password-only"),
+        pytest.param("https://@models.example/x.safetensors", id="empty-userinfo"),
+        pytest.param("https://TOKEN%40models.example/x.safetensors", id="encoded-at"),
+        pytest.param("https://user%3Asecret%40models.example/x.safetensors", id="encoded-user-and-password"),
+        pytest.param("https://user:secret%40models.example/x.safetensors", id="encoded-at-after-password"),
+        pytest.param("https://TOKEN%2540models.example/x.safetensors", id="double-encoded-at"),
+    ],
+)
+def test_a_link_with_a_credential_before_its_host_is_never_opened(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, uri: str
+) -> None:
+    # Given: through an HTTP proxy, urllib sends the userinfo in the clear in its
+    # CONNECT line, before TLS starts, and percent-decodes it first, so
+    # TOKEN%40host goes out as TOKEN@host. A source: local model keeps its link
+    # on the wire and skips the link rules, so every form reaches the hash probe
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", _head(sent))
+    write_spec(workspace, models=[local_model(sourceUri=uri, sha256=_SHA_A)], nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then: no request is opened for the link, the filename lookup answers, and
+    # no message or lookup names the credential
+    assert result.exit_code == 0, result.stderr
+    assert sent == []
+    (lookup,) = _envelope(result)["data"]["model_lookups"]
+    assert lookup["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["base.safetensors"]}}]
+    for credential in ("secret", "TOKEN"):
+        assert credential not in result.stderr
+        assert credential not in json.dumps(lookup)
+
+
+def test_a_spec_written_apart_from_its_install_names_the_flags_that_point_at_it(
+    workspace: Path, tmp_path: Path
+) -> None:
+    # Given: `init -o` put the spec in another folder
+    elsewhere = tmp_path / "elsewhere"
+    output = elsewhere / "comfy-build.yaml"
+    args = ["--name", "Apart", "--python", sys.executable, "--comfy-version", "0.3.40", "-o", str(output)]
+    env = {"AI_AGENT": "1", "COMFY_OUTPUT": "json", "NO_COLOR": "1"}
+    initialized = CliRunner().invoke(cli_app, ["build", "init", *args, str(workspace)], env=env)
+    assert initialized.exit_code == 0, initialized.output
+
+    # When
+    refused = _invoke(elsewhere)
+    pointed = _invoke(
+        elsewhere, "--models-dir", str(workspace / "models"), "--custom-nodes-dir", str(workspace / "custom_nodes")
+    )
+
+    # Then
+    assert refused.exit_code == 1
+    error = _envelope(refused)["error"]
+    assert error["code"] == "build_spec_invalid"
+    # The registered advice leads, so a misspelled or deleted entry still reads as one to fix
+    assert error["hint"].startswith(error_codes.get("build_spec_invalid").hint)
+    assert str(elsewhere / "models") in error["hint"]
+    assert "the folder for each kind of entry" in error["hint"]
+    assert "--models-dir <install>/models" in error["hint"]
+    assert "--custom-nodes-dir <install>/custom_nodes" in error["hint"]
+    assert pointed.exit_code == 0, pointed.output
+
+
+def test_a_spec_error_that_is_not_a_path_names_no_scan_folders(workspace: Path) -> None:
+    # Given: a spec whose only problem has nothing to do with where the install is
+    spec = write_spec(workspace, models=[local_model()], nodes=[local_node()])
+    spec.write_text(spec.read_text(encoding="utf-8").replace("description: ''", "description: 7"), encoding="utf-8")
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    error = _envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert "description must be a string" in error["message"]
+    assert "--models-dir" not in error["hint"]
+    assert "--custom-nodes-dir" not in error["hint"]

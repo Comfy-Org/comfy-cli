@@ -13,17 +13,137 @@ from typing import Any
 import pytest
 
 from comfy_cli.command.run.loader import _classify_api_workflow
+from comfy_cli.cql import engine as cql_engine
 from comfy_cli.cql.engine import (
+    _MAX_DYNAMIC_COMBO_DEPTH,
     Graph,
     Port,
     _apply_one_slot,
+    _count_instances,
     _extract_frontend_slots,
+    _subgraph_defs_by_id,
+    _SubgraphDefs,
     _write_widget,
 )
+
+
+def test_subgraph_definition_registration_uses_identity_refcounts():
+    definitions = _SubgraphDefs()
+    shared = {"id": "shared"}
+    replacement = {"id": "replacement"}
+    definitions["id"] = shared
+    definitions["alias"] = shared
+
+    definitions["id"] = replacement
+    assert id(shared) in definitions.registered_definition_ids
+    assert definitions._registered_definition_refcounts[id(shared)] == 1
+
+    del definitions["alias"]
+    assert id(shared) not in definitions.registered_definition_ids
+    assert id(replacement) in definitions.registered_definition_ids
+
+
+@pytest.mark.parametrize("mutation", ["overwrite", "delete", "pop", "popitem", "clear"])
+def test_subgraph_definition_membership_changes_invalidate_derived_caches(mutation):
+    definitions = _SubgraphDefs()
+    original = {"id": "original", "inputs": [], "nodes": [], "links": []}
+    definitions["id"] = original
+    definitions.promotion_visit_limits[id(original)] = 7
+    definitions.promotion_inputs[id(original)] = (original, ["stale"])
+    definitions.promotion_budget_roots["promotion_inputs_budget"] = {id(original)}
+    definitions.promotion_inputs_budget = [99]
+
+    if mutation == "overwrite":
+        definitions["id"] = {"id": "replacement"}
+    elif mutation == "delete":
+        del definitions["id"]
+    elif mutation == "pop":
+        definitions.pop("id")
+    elif mutation == "popitem":
+        definitions.popitem()
+    else:
+        definitions.clear()
+
+    assert definitions.promotion_visit_limits == {}
+    assert definitions.promotion_inputs == {}
+    assert definitions.promotion_budget_roots == {}
+    assert definitions.promotion_inputs_budget is None
+
 
 # ---------------------------------------------------------------------------
 # Shared fixture: a small but realistic object_info
 # ---------------------------------------------------------------------------
+
+
+def test_subgraph_name_alias_checks_preserve_every_deep_acyclic_definition():
+    definitions = [
+        {
+            "id": f"id-{index}",
+            "name": f"Alias{index}",
+            "nodes": ([{"id": index, "type": f"id-{index + 1}"}] if index < 31 else []),
+        }
+        for index in range(32)
+    ]
+    workflow = {
+        "nodes": [{"id": index, "type": f"Alias{index}"} for index in range(32)],
+        "definitions": {"subgraphs": definitions},
+    }
+
+    resolved = _subgraph_defs_by_id(workflow)
+
+    assert all(f"Alias{index}" in resolved for index in range(32))
+
+
+def test_subgraph_alias_bit_matrix_fails_closed_above_cap(monkeypatch):
+    definitions = [{"id": f"id-{index}", "name": f"Alias{index}", "nodes": []} for index in range(3)]
+    workflow = {
+        "nodes": [{"id": index, "type": f"Alias{index}"} for index in range(3)],
+        "definitions": {"subgraphs": definitions},
+    }
+    monkeypatch.setattr(cql_engine, "_MAX_DEFINITION_ALIAS_MASK_BITS", 4)
+
+    resolved = _subgraph_defs_by_id(workflow)
+
+    assert set(resolved) == {"id-0", "id-1", "id-2"}
+
+
+def test_subgraph_alias_bit_matrix_still_publishes_unused_definition_names(monkeypatch):
+    definitions = [{"id": f"id-{index}", "name": f"Alias{index}", "nodes": []} for index in range(3)]
+    workflow = {"nodes": [{"id": 1, "type": "Alias0"}], "definitions": {"subgraphs": definitions}}
+    monkeypatch.setattr(cql_engine, "_MAX_DEFINITION_ALIAS_MASK_BITS", 4)
+
+    resolved = _subgraph_defs_by_id(workflow)
+
+    assert resolved["Alias0"] is definitions[0]
+    assert resolved["Alias1"] is definitions[1]
+    assert resolved["Alias2"] is definitions[2]
+
+
+def test_subgraph_alias_conflicts_follow_name_typed_definition_edges():
+    leaf = {"id": "leaf-id", "name": "LeafAlias", "nodes": [{"id": 3, "type": "OuterAlias"}]}
+    outer = {"id": "outer-id", "name": "OuterAlias", "nodes": [{"id": 2, "type": "LeafAlias"}]}
+    resolved = _subgraph_defs_by_id(
+        {"nodes": [{"id": 1, "type": "OuterAlias"}], "definitions": {"subgraphs": [outer, leaf]}}
+    )
+
+    assert "OuterAlias" not in resolved
+    assert "LeafAlias" not in resolved
+
+
+def test_rejected_name_alias_does_not_hide_an_unrelated_valid_alias():
+    outer = {"id": "outer-id", "name": "Outer", "nodes": [{"id": 1, "type": "KSampler"}]}
+    conflicting = {
+        "id": "sampler-id",
+        "name": "KSampler",
+        "nodes": [{"id": 2, "type": "KSampler"}, {"id": 3, "type": "Outer"}],
+    }
+
+    resolved = _subgraph_defs_by_id(
+        {"nodes": [{"id": 4, "type": "Outer"}], "definitions": {"subgraphs": [outer, conflicting]}}
+    )
+
+    assert resolved["Outer"] is outer
+    assert "KSampler" not in resolved
 
 
 def _object_info() -> dict[str, Any]:
@@ -146,6 +266,10 @@ def _object_info() -> dict[str, Any]:
         # V3 autogrow node mirroring the live cloud BatchImagesNode shape:
         # one declared input `images` (COMFY_AUTOGROW_V3), but the server
         # expects autogrown slot keys `images.image0`, `images.image1`, …
+        # Deliberately template-LESS: this is the catalog shape that carries no
+        # `template_required` signal, so it pins the historical `port.required`
+        # fallback in `_check_autogrow_required`. Groups whose template IS
+        # readable are covered by `TestAutogrowMinSlots`.
         "BatchImagesNode": {
             "input": {
                 "required": {
@@ -389,6 +513,53 @@ class TestWidgetOrderForNode:
         g = self._dyn_graph()
         assert g.widget_order_default("DynNode") == ["model", "model.res", "seed", "control_after_generate"]
 
+    def test_invalid_declared_default_falls_back_to_first_key(self):
+        info = {
+            "DynNode": {
+                "input": {
+                    "required": {
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "default": "missing",
+                                "options": [
+                                    {
+                                        "key": "a",
+                                        "inputs": {
+                                            "required": {"res": ["COMBO", {"options": ["x", "y"], "default": "x"}]}
+                                        },
+                                    },
+                                    {"key": "b", "inputs": {"required": {}}},
+                                ],
+                            },
+                        ],
+                        "seed": ["INT", {"default": 0}],
+                    }
+                },
+                "input_order": {"required": ["model", "seed"]},
+                "output": ["IMAGE"],
+                "output_name": ["IMAGE"],
+                "category": "test",
+                "display_name": "Dyn",
+                "python_module": "nodes",
+            }
+        }
+        g = Graph.from_object_info(info)
+
+        assert g.widget_default_for_node("DynNode", "model") == "a"
+        assert g.widget_order_default("DynNode") == [
+            "model",
+            "model.res",
+            "seed",
+            "control_after_generate",
+        ]
+        assert g.widget_order_for_node("DynNode", []) == [
+            "model",
+            "model.res",
+            "seed",
+            "control_after_generate",
+        ]
+
     def test_node_order_expands_selected_key(self):
         g = self._dyn_graph()
         # Selecting "b" adds model.quality, pushing seed to index 3. The trailing
@@ -548,6 +719,21 @@ class TestWidgetOrderDynamicCombo:
         # alpha's defaults (size first-enum, width default).
         assert out["nodes"][0]["widgets_values"] == ["p", "alpha", "S", 512, 7, "fixed"]
 
+    def test_outer_selector_change_normalizes_nested_numeric_default(self):
+        info = _dynamic_combo_object_info()
+        model_options = info["DynNode"]["input"]["required"]["model"][1]["options"]
+        mode = model_options[1]["inputs"]["required"]["mode"][1]
+        mode["default"] = 2.0
+        mode["options"][0]["key"] = 1
+        mode["options"][1]["key"] = 2
+        graph = Graph.from_object_info(info)
+        wf = {"nodes": [{"id": 1, "type": "DynNode", "widgets_values": ["p", "alpha", "S", 512, 7, "fixed"]}]}
+
+        out, warnings = graph.apply_slots(wf, {"1.model": "beta"})
+
+        assert [warning["code"] for warning in warnings] == ["dynamic_combo_roster_rebuilt"]
+        assert out["nodes"][0]["widgets_values"] == ["p", "beta", 2, 50, True, 7, "fixed"]
+
 
 def _dynamic_combo_implicit_seed_object_info() -> dict:
     """A COMFY_DYNAMICCOMBO_V3 option whose sub-input is an implicit
@@ -590,28 +776,234 @@ def _prefixed_dynamic_combo_object_info() -> dict:
 
 
 class TestDynamicComboImplicitControlAfterGenerate:
-    """Sub-input seed/noise_seed widgets companion a control_after_generate
-    marker even without the schema flag — same rule as the UI→API converter."""
+    """An unflagged sub-input seed gets NO control_after_generate marker: the
+    frontend names it ``mode.seed``, so ``useIntWidget``'s exact
+    ``seed``/``noise_seed`` rule never matches (saved TextGenerate templates
+    carry no marker after ``sampling_mode.seed``)."""
 
     @pytest.fixture
     def seed_graph(self) -> Graph:
         return Graph.from_object_info(_dynamic_combo_implicit_seed_object_info())
 
-    def test_value_aware_order_includes_implicit_marker(self, seed_graph: Graph):
-        order = seed_graph.widget_order_for_node("SeedComboNode", ["a", 0, "fixed"])
-        assert order == ["mode", "mode.seed", "control_after_generate"]
+    def test_value_aware_order_has_no_implicit_sub_marker(self, seed_graph: Graph):
+        order = seed_graph.widget_order_for_node("SeedComboNode", ["a", 0])
+        assert order == ["mode", "mode.seed"]
 
-    def test_roster_rebuild_synthesizes_implicit_marker_default(self, seed_graph: Graph):
+    def test_roster_rebuild_writes_no_implicit_sub_marker(self, seed_graph: Graph):
         wf = {"nodes": [{"id": 1, "type": "SeedComboNode", "widgets_values": [None]}]}
         out, warnings = seed_graph.apply_slots(wf, {"1.mode": "a"})
         assert [w["code"] for w in warnings] == ["dynamic_combo_roster_rebuilt"]
-        assert out["nodes"][0]["widgets_values"] == ["a", 0, "fixed"]
+        assert out["nodes"][0]["widgets_values"] == ["a", 0]
 
     def test_roster_rebuild_respects_extend_false(self):
         graph = Graph.from_object_info(_prefixed_dynamic_combo_object_info())
         node = {"id": 1, "type": "PrefixedDynNode", "widgets_values": []}
         with pytest.raises(ValueError, match="out of range"):
             _write_widget(node, "mode", "a", graph, extend=False)
+
+    def test_selector_write_pads_earlier_widgets_with_frontend_defaults(self):
+        info = {
+            "PaddedSelector": {
+                "input": {
+                    "required": {
+                        "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                        "cfg": ["FLOAT", {"default": 8.0}],
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "default": "a",
+                                "options": [
+                                    {"key": "a", "inputs": {"required": {}}},
+                                    {"key": "b", "inputs": {"required": {"size": ["INT", {"default": 512}]}}},
+                                ],
+                            },
+                        ],
+                    }
+                },
+                "input_order": {"required": ["seed", "cfg", "model"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "PaddedSelector", "widgets_values": []}
+
+        _write_widget(node, "model", "b", graph, extend=True)
+
+        assert node["widgets_values"] == [0, "fixed", 8.0, "b", 512]
+
+    def test_writing_subwidget_materializes_a_missing_selector_default(self):
+        info = _dynamic_combo_implicit_seed_object_info()
+        info["SeedComboNode"]["input"]["required"]["mode"][1]["default"] = "a"
+        seed_graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "SeedComboNode", "widgets_values": []}
+
+        _write_widget(node, "mode.seed", 42, seed_graph, extend=True)
+
+        assert node["widgets_values"] == ["a", 42]
+        assert seed_graph.widget_order_for_node("SeedComboNode", node["widgets_values"]) == ["mode", "mode.seed"]
+
+    def test_writing_nested_subwidget_materializes_every_missing_selector(self):
+        info = _dynamic_combo_object_info()
+        beta_inputs = info["DynNode"]["input"]["required"]["model"][1]["options"][1]["inputs"]["required"]
+        beta_inputs["mode"][1]["default"] = "fast"
+        dyn_graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "DynNode", "widgets_values": ["prompt", "beta"]}
+
+        _write_widget(node, "model.mode.steps", 77, dyn_graph, extend=True)
+
+        assert node["widgets_values"][:4] == ["prompt", "beta", "fast", 77]
+
+    def test_padding_keeps_an_earlier_no_default_selector_absent(self):
+        info = {
+            "TwoDynNode": {
+                "input": {
+                    "required": {
+                        "a": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {
+                                        "key": "a1",
+                                        "inputs": {"required": {"p": ["INT", {"default": 1}]}},
+                                    }
+                                ]
+                            },
+                        ],
+                        "b": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "default": "b1",
+                                "options": [
+                                    {
+                                        "key": "b1",
+                                        "inputs": {"required": {"q": ["INT", {"default": 2}]}},
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                },
+                "input_order": {"required": ["a", "b"]},
+                "output": ["IMAGE"],
+                "output_name": ["IMAGE"],
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "TwoDynNode", "widgets_values": []}
+
+        _write_widget(node, "b.q", 7, graph, extend=True)
+
+        assert node["widgets_values"] == [None, "b1", 7]
+        assert graph.widget_order_for_node("TwoDynNode", node["widgets_values"]) == ["a", "b", "b.q"]
+
+    def test_padding_materializes_control_markers_and_plain_defaults(self):
+        info = {
+            "Node": {
+                "input": {
+                    "required": {
+                        "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                        "cfg": ["FLOAT", {"default": 8.0}],
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "default": "a",
+                                "options": [
+                                    {
+                                        "key": "a",
+                                        "inputs": {"required": {"x": ["INT", {"default": 1}]}},
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                },
+                "input_order": {"required": ["seed", "cfg", "model"]},
+                "output": [],
+                "output_name": [],
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "Node", "widgets_values": []}
+
+        _write_widget(node, "model.x", 9, graph, extend=True)
+
+        assert node["widgets_values"] == [0, "fixed", 8.0, "a", 9]
+
+    def test_final_padding_materializes_truncated_dynamic_subwidget_defaults(self):
+        graph = Graph.from_object_info(_dynamic_combo_object_info())
+        node = {"id": 1, "type": "DynNode", "widgets_values": ["prompt", "alpha"]}
+
+        _write_widget(node, "model.width", 9, graph, extend=True)
+
+        assert node["widgets_values"][:4] == ["prompt", "alpha", "S", 9]
+
+    def test_many_missing_sibling_selectors_are_not_limited_by_nesting_cap(self):
+        inputs = {
+            f"selector_{index}": [
+                "COMFY_DYNAMICCOMBO_V3",
+                {
+                    "default": "a",
+                    "options": [
+                        {
+                            "key": "a",
+                            "inputs": {"required": {"x": ["INT", {"default": index}]}},
+                        }
+                    ],
+                },
+            ]
+            for index in range(_MAX_DYNAMIC_COMBO_DEPTH + 2)
+        }
+        info = {
+            "ManySelectors": {
+                "input": {"required": inputs},
+                "input_order": {"required": list(inputs)},
+                "output": [],
+                "output_name": [],
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "ManySelectors", "widgets_values": []}
+        target = f"selector_{_MAX_DYNAMIC_COMBO_DEPTH + 1}.x"
+
+        _write_widget(node, target, 99, graph, extend=True)
+
+        assert node["widgets_values"][-2:] == ["a", 99]
+
+    def test_layout_and_server_validation_share_python_key_equality(self):
+        info = {
+            "BoolKeys": {
+                "input": {
+                    "required": {
+                        "mode": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {"key": 1, "inputs": {"required": {"number": ["INT", {"default": 1}]}}},
+                                    {"key": True, "inputs": {"required": {"boolean": ["INT", {"default": 2}]}}},
+                                ]
+                            },
+                        ]
+                    }
+                },
+                "input_order": {"required": ["mode"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+
+        assert graph.widget_order_for_node("BoolKeys", [True, 2]) == ["mode", "mode.number"]
+        result = graph.validate_workflow({"1": {"class_type": "BoolKeys", "inputs": {"mode": True, "mode.number": 2}}})
+        assert result["valid"] is True, result["errors"]
+        assert not [warning for warning in result["warnings"] if warning["code"] == "unknown_input"]
 
 
 # ===========================================================================
@@ -1013,15 +1405,21 @@ class TestValidateWorkflow:
         assert result["valid"] is True
         assert result["errors"] == []
 
-    def test_non_node_key_warns(self, graph: Graph):
-        """An unrecognized non-node key should produce a warning, not an error."""
+    def test_dict_key_without_class_type_errors(self, graph: Graph):
+        """A dict key with no class_type is a REJECT, not a stray annotation.
+
+        This asserted a warning and a valid verdict until the server was asked:
+        it answers 400 `missing_node_type` ("Node 'ID #notanode' has no
+        class_type") for exactly this workflow, whether or not an output
+        reaches the key. A non-dict value is still only a warning — see
+        test_non_dict_node_value_warns, which the server 500s on (its own bug).
+        """
         wf = {**self._valid_workflow(), "notanode": {"title": "My Workflow"}}
         result = graph.validate_workflow(wf)
-        assert result["valid"] is True, result["errors"]
-        non_node = [w for w in result["warnings"] if w["code"] == "non_node_key"]
-        assert len(non_node) == 1
-        assert non_node[0]["node_id"] == "notanode"
-        assert non_node[0]["field"] == "notanode"
+        assert result["valid"] is False
+        missing = [e for e in result["errors"] if e["code"] == "missing_class_type"]
+        assert len(missing) == 1
+        assert missing[0]["node_id"] == "notanode"
 
     def test_meta_provenance_key_is_not_warned(self, graph: Graph):
         """`_meta` is the compose/run provenance block (stripped before submit),
@@ -1101,10 +1499,14 @@ class TestValidateWorkflow:
                 "class_type": "KSampler",
                 "inputs": {"model": ["99", 0]},
             },
+            # Reachable from an output, so the server would validate it: an
+            # unreachable node is pruned and its edges are advisory.
+            "2": {"class_type": "VAEDecode", "inputs": {"samples": ["1", 0], "vae": ["99", 2]}},
+            "3": {"class_type": "SaveImage", "inputs": {"images": ["2", 0]}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
-        errs = [e for e in result["errors"] if e["code"] == "dangling_edge"]
+        errs = [e for e in result["errors"] if e["code"] == "dangling_edge" and e["node_id"] == "1"]
         assert len(errs) == 1
         assert "99" in errs[0]["message"]
 
@@ -1121,6 +1523,8 @@ class TestValidateWorkflow:
                 # Index 5 is out of range
                 "inputs": {"model": ["1", 5]},
             },
+            "3": {"class_type": "VAEDecode", "inputs": {"samples": ["2", 0], "vae": ["1", 2]}},
+            "4": {"class_type": "SaveImage", "inputs": {"images": ["3", 0]}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
@@ -1311,10 +1715,12 @@ class TestValidateWorkflow:
                     "latent_image": ["97", 0],  # dangling
                 },
             },
+            "2": {"class_type": "VAEDecode", "inputs": {"samples": ["1", 0], "vae": ["96", 0]}},
+            "3": {"class_type": "SaveImage", "inputs": {"images": ["2", 0]}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
-        dangling = [e for e in result["errors"] if e["code"] == "dangling_edge"]
+        dangling = [e for e in result["errors"] if e["code"] == "dangling_edge" and e["node_id"] == "1"]
         assert len(dangling) == 3
 
     def test_below_min_error(self, graph: Graph):
@@ -1334,6 +1740,9 @@ class TestValidateWorkflow:
         errs = [e for e in result["errors"] if e["code"] == "below_min"]
         assert len(errs) == 1
         assert errs[0]["field"] == "width"
+        # The rejected value and the violated bound ride on the finding, not just the message.
+        assert errs[0]["value"] == 0
+        assert "bound" in errs[0]
         # No longer surfaced as a warning.
         assert "below_min" not in [w["code"] for w in result["warnings"]]
 
@@ -1352,6 +1761,8 @@ class TestValidateWorkflow:
         errs = [e for e in result["errors"] if e["code"] == "above_max"]
         assert len(errs) == 1
         assert errs[0]["field"] == "width"
+        assert errs[0]["value"] == 999999
+        assert "bound" in errs[0]
         assert "above_max" not in [w["code"] for w in result["warnings"]]
 
 
@@ -1423,6 +1834,9 @@ class TestAutogrowInputs:
                 "class_type": "BatchImagesNode",
                 "inputs": {"images.image0": ["99", 0]},
             },
+            # Output-reachable, so the server validates it: on a pruned node
+            # the server never resolves the link and accepts the prompt.
+            "21": {"class_type": "SaveImage", "inputs": {"images": ["20", 0]}},
         }
         result = graph.validate_workflow(wf)
         codes = [e["code"] for e in result["errors"]]
@@ -2168,11 +2582,11 @@ class TestValidateUnmarkedInputFileCombo:
     """A COMBO whose options are the server's INPUT-FOLDER listing is upload-
     backed even when object_info carries no ``<kind>_upload`` marker.
 
-    Found in prod (Langfuse 2026-08-25, 3 ``run`` failures, one user): the
-    agent uploaded eight ``.mp4`` shots to Comfy Cloud, wired each content hash
-    into a ``VHS_LoadVideo.video`` widget, and ``comfy run`` refused every node
-    with ``unknown_enum_value '<64hex>.mp4' not in 1 known options for video
-    (did you mean: bedroom.mp4?)``. The whole assembly never rendered.
+    For example: an agent uploads several ``.mp4`` shots to Comfy Cloud, wires
+    each content hash into a ``VHS_LoadVideo.video`` widget, and ``comfy run``
+    refused every node with ``unknown_enum_value '<64hex>.mp4' not in 1 known
+    options for video (did you mean: bedroom.mp4?)``, so the whole assembly
+    never rendered.
 
     The marker is the frontend's contract for CORE loaders only. VideoHelperSuite
     builds ``video`` from ``folder_paths.get_input_directory()`` filtered by its
@@ -2597,6 +3011,36 @@ class TestDirectModeSlots:
         warnings = _apply_one_slot(wf, "3.steps", 99999, graph)
         codes = [w["code"] for w in warnings]
         assert "above_max" in codes
+        # The rejected value and the violated bound ride on the finding too,
+        # not just the message — same contract as the workflow-level path.
+        above_max = next(w for w in warnings if w["code"] == "above_max")
+        assert above_max["value"] == 99999
+        assert "bound" in above_max
+
+    def test_legacy_primitive_write_mirrors_a_present_widgets_values_named(self, graph: Graph):
+        """jaeone94's review on #1106 (comment-6734369598): the
+        ``legacy_primitive`` branch of ``_apply_one_slot_impl`` wrote
+        ``widgets_values`` positionally but never touched a present
+        ``widgets_values_named``, leaving it stale. A legacy ``PrimitiveNode``
+        has no catalog entry, so its register key is the frontend's fixed
+        ``"value"`` name (``cql.promoted._PRIMITIVE_WIDGET_ORDER``) regardless
+        of which alias (``value`` or the fed widget's own name) addressed the
+        write."""
+        wf = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "PrimitiveNode",
+                    "widgets_values": ["old prompt"],
+                    "widgets_values_named": {"value": "old prompt"},
+                }
+            ],
+            "links": [],
+        }
+        _apply_one_slot(wf, "1.value", "new prompt", graph)
+        node = wf["nodes"][0]
+        assert node["widgets_values"] == ["new prompt"]
+        assert node["widgets_values_named"] == {"value": "new prompt"}
 
 
 class TestSlotSuggestionOnNotFound:
@@ -2753,6 +3197,38 @@ class TestSubgraphIsolation:
         inst12 = next(n for n in wf["nodes"] if n["id"] == 12)
         inst12_def = defs[inst12["type"]]
         assert inst12_def["nodes"][0]["widgets_values"][0] == "orig"
+
+    def test_rejected_replay_does_not_leave_a_shared_definition_fork(self, graph: Graph):
+        from comfy_cli import workflow_ops
+
+        wf = {
+            "nodes": [{"id": 10, "type": "uuid-def-1"}, {"id": 12, "type": "uuid-def-1"}],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "uuid-def-1",
+                        "name": "Sub",
+                        "nodes": [{"id": 9, "type": "CLIPTextEncode", "widgets_values": ["orig"]}],
+                    }
+                ]
+            },
+        }
+        before = copy.deepcopy(wf)
+        op = workflow_ops._new_op(
+            "set_widget",
+            "agent",
+            1,
+            node_id="10/9",
+            widget="missing",
+            value="x",
+            path=["10", "9"],
+            inner_widget="missing",
+        )
+
+        with pytest.raises(ValueError, match="not found"):
+            workflow_ops.apply_op(wf, op, graph)
+
+        assert wf == before
 
     def test_single_instance_no_fork(self, graph: Graph):
         """When only one instance of a def exists, no fork is created."""
@@ -2954,7 +3430,7 @@ def test_slot_address_with_dotted_input_name(graph, monkeypatch):
     monkeypatch.setattr(
         graph,
         "widget_order_for_node",
-        lambda nt, wv: ["images.image0"] if nt == "DottedWidgetNode" else real_order(nt, wv),
+        lambda nt, wv, sn=None: ["images.image0"] if nt == "DottedWidgetNode" else real_order(nt, wv, sn),
     )
 
     wf = {
@@ -3385,7 +3861,8 @@ class TestDynamicComboInputs:
 
     def test_required_missing_hint_truncates_many_selection_keys(self):
         """A dynamic combo with hundreds of options must not dump them all
-        into the required_input_missing hint — first 8, then a count."""
+        into the required_input_missing error — the first few, a count, and
+        the query that lists the rest."""
         options = [{"key": f"ckpt-{i:03d}", "inputs": {"required": {}, "optional": {}}} for i in range(30)]
         info = {
             "Loader": {
@@ -3402,9 +3879,12 @@ class TestDynamicComboInputs:
         result = g.validate_workflow({"1": {"class_type": "Loader", "inputs": {}}})
         err = next(e for e in result["errors"] if e["code"] == "required_input_missing")
         hint = err["hint"]
-        assert "ckpt-007" in hint
-        assert "ckpt-008" not in hint
-        assert "and 22 more" in hint
+        assert err["suggestions"] == ["ckpt-000", "ckpt-001", "ckpt-002", "ckpt-003", "ckpt-004"]
+        assert err["option_count"] == 30
+        assert "valid_options" not in err
+        assert "ckpt-005" not in json.dumps(err)
+        assert "of 30 options" in hint
+        assert 'inputs.#(name=="model").selection_keys' in hint
 
     def test_stale_sub_key_warning_survives_on_unreachable_node(self):
         """dyn_errors/dyn_warnings used to be bundled into one reachability
@@ -3756,6 +4236,544 @@ class TestDynamicComboAutogrowSub:
         assert "model.images.image0" in err["hint"]
 
 
+class TestAutogrowMinSlots:
+    """The server places autogrow slots ``i < min`` in its ``required``
+    section whenever the template's own inner input is required
+    (``Autogrow._expand_schema_for_dynamic``: ``if i < min and
+    template_required``), and rejects the prompt when they aren't wired.
+    Both the top-level group and a dynamic-combo-nested one must mirror that.
+
+    The fixture's two groups mirror live nodes on ComfyUI master:
+    ``AutogrowTopNode.images`` is ``MeshyMultiImageToModelNode.images``
+    (``TemplatePrefix(min=2, max=4)``), and ``AutogrowNestedNode.model``'s
+    ``strict`` option is ``GrokVideoReferenceNode.model``
+    (``TemplateNames(reference_1…7, min=1)``).
+    """
+
+    def _wf(self, node: dict, *, reachable: bool = True) -> dict:
+        """`node` plus an IMAGE producer and a Sink output node. `reachable`
+        controls whether the Sink actually consumes the node — the server
+        prunes (and never validates) anything an output can't reach."""
+        return {
+            "0": {"class_type": "ImageSrc", "inputs": {}},
+            "1": node,
+            "2": {"class_type": "Sink", "inputs": {"image": ["1", 0]} if reachable else {}},
+        }
+
+    # -- nested (dynamic-combo sub-input) --------------------------------
+
+    def test_nested_min_one_with_zero_slots_errors(self, graph_dynamic: Graph):
+        """Zero slots reports `autogrow_no_slots` at BOTH depths — the same
+        authoring mistake must not carry two different codes depending on
+        nesting, or a consumer filtering on one silently misses the other."""
+        wf = self._wf({"class_type": "AutogrowNestedNode", "inputs": {"model": "strict"}})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        errs = [e for e in result["errors"] if e["code"] == "autogrow_no_slots"]
+        assert len(errs) == 1
+        assert errs[0]["node_id"] == "1"
+        assert errs[0]["field"] == "model.refs"
+        assert "places 1 of them in `required`" in errs[0]["message"]
+        assert "model.refs.reference_1" in errs[0]["hint"]
+        assert [e["code"] for e in result["errors"] if e["code"] == "autogrow_below_min"] == []
+
+    def test_nested_min_one_with_one_slot_is_clean(self, graph_dynamic: Graph):
+        wf = self._wf(
+            {
+                "class_type": "AutogrowNestedNode",
+                "inputs": {"model": "strict", "model.refs.reference_1": ["0", 0]},
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+        # The wired slot must stay a known key, not unknown_input noise.
+        assert result["warnings"] == []
+
+    def test_nested_below_min_still_accepts_the_slots_that_are_wired(self, graph_dynamic: Graph):
+        """A short count is ONE error about the count — the slots that ARE
+        present stay valid keys, rather than regressing into `unknown_input`
+        noise on top of it."""
+        wf = self._wf(
+            {
+                "class_type": "AutogrowNestedNode",
+                "inputs": {"model": "strict_pair", "model.refs.reference_1": ["0", 0]},
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert [e["code"] for e in result["errors"]] == ["autogrow_below_min"]
+        assert "'model.refs.reference_2'" in result["errors"][0]["message"]
+        assert result["warnings"] == []
+
+    def test_nested_seedream_style_min_zero_stays_lenient(self, graph_dynamic: Graph):
+        """Regression pin: a group declaring `min: 0` INSIDE the option's
+        `required` section legitimately emits no slot keys at all (Seedream's
+        `model.images`), and the server accepts it."""
+        wf = self._wf({"class_type": "AutogrowNestedNode", "inputs": {"model": "lenient"}})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+
+    def test_optional_section_template_ignores_min(self, graph_dynamic: Graph):
+        """`min: 1`, but the template's inner input sits in the TEMPLATE's
+        `optional` section — the server's `template_required` gate is False,
+        so it never promotes a slot to `required` ("if not required, min can
+        be ignored")."""
+        wf = self._wf({"class_type": "AutogrowNestedNode", "inputs": {"model": "optional_template"}})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+
+    def test_nested_below_min_on_unreachable_node_is_not_a_hard_error(self, graph_dynamic: Graph):
+        """The server prunes a node no output reaches and never validates it,
+        so the count check must not reject one either."""
+        wf = self._wf({"class_type": "AutogrowNestedNode", "inputs": {"model": "strict"}}, reachable=False)
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["errors"] == []
+
+    # -- top level --------------------------------------------------------
+
+    def test_top_level_partial_fill_below_min_errors(self, graph_dynamic: Graph):
+        """The false negative this closes: one wired slot against `min: 2`
+        used to pass, because the old check only looked for zero slots."""
+        wf = self._wf({"class_type": "AutogrowTopNode", "inputs": {"images.image0": ["0", 0]}})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "autogrow_below_min")
+        assert err["node_id"] == "1"
+        assert err["field"] == "images"
+        assert "missing 1 of the 2 slot(s)" in err["message"]
+        assert "'images.image1'" in err["message"]
+
+    def test_top_level_sparse_slots_meet_the_count_but_not_the_names(self, graph_dynamic: Graph):
+        """Two slots against `min: 2` — but the server expands `image0…image3`
+        and marks `image0`/`image1` required, so a workflow that skipped
+        `image0` is still a reject. Counting alone would pass this.
+
+        Gaps are not hypothetical: `workflow_ops._first_free_autogrow_index`
+        exists because legacy workflows carry them."""
+        wf = self._wf(
+            {
+                "class_type": "AutogrowTopNode",
+                "inputs": {"images.image1": ["0", 0], "images.image2": ["0", 0]},
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "autogrow_below_min")
+        assert "'images.image0'" in err["message"]
+        # Only the genuinely missing one is named — `images.image1` is wired.
+        assert "'images.image1'" not in err["message"]
+
+    def test_top_level_undeclared_slot_names_do_not_count(self, graph_dynamic: Graph):
+        """Keys under the prefix that the schema never declares (`images.bogus`)
+        are not slots the server expands, so they cannot satisfy the minimum."""
+        wf = self._wf(
+            {
+                "class_type": "AutogrowTopNode",
+                "inputs": {"images.image0": ["0", 0], "images.bogus": ["0", 0]},
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        err = next(e for e in result["errors"] if e["code"] == "autogrow_below_min")
+        assert "'images.image1'" in err["message"]
+
+    def test_nested_sparse_slots_meet_the_count_but_not_the_names(self, graph_dynamic: Graph):
+        """The nested path owes the same precision: `min: 2` over
+        `reference_1…3` requires those first two names specifically."""
+        wf = self._wf(
+            {
+                "class_type": "AutogrowNestedNode",
+                "inputs": {
+                    "model": "strict_pair",
+                    "model.refs.reference_2": ["0", 0],
+                    "model.refs.reference_3": ["0", 0],
+                },
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert [e["code"] for e in result["errors"]] == ["autogrow_below_min"]
+        assert "'model.refs.reference_1'" in result["errors"][0]["message"]
+        # The wired slots stay known keys even while the count is short.
+        assert result["warnings"] == []
+
+    def test_top_level_at_min_is_clean(self, graph_dynamic: Graph):
+        wf = self._wf(
+            {
+                "class_type": "AutogrowTopNode",
+                "inputs": {"images.image0": ["0", 0], "images.image1": ["0", 0]},
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+
+    def test_top_level_zero_slots_keeps_the_no_slots_code(self, graph_dynamic: Graph):
+        """Zero slots keeps reporting `autogrow_no_slots` — the existing code
+        and wording — rather than being reclassified as below-min."""
+        wf = self._wf({"class_type": "AutogrowTopNode", "inputs": {}})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        codes = [e["code"] for e in result["errors"]]
+        assert "autogrow_no_slots" in codes
+        assert "autogrow_below_min" not in codes
+
+    def test_top_level_bare_wiring_does_not_also_report_a_count_error(self, graph_dynamic: Graph):
+        """`images: [src, idx]` is the `autogrow_bare_input` mistake; piling a
+        count error on top of it would just be noise."""
+        wf = self._wf({"class_type": "AutogrowTopNode", "inputs": {"images": ["0", 0]}})
+        result = graph_dynamic.validate_workflow(wf)
+        codes = [e["code"] for e in result["errors"]]
+        assert codes == ["autogrow_bare_input"]
+
+    def test_top_level_below_min_on_unreachable_node_is_not_a_hard_error(self, graph_dynamic: Graph):
+        wf = self._wf({"class_type": "AutogrowTopNode", "inputs": {"images.image0": ["0", 0]}}, reachable=False)
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["errors"] == []
+
+    def test_top_level_zero_slots_names_the_minimum_it_owes(self, graph_dynamic: Graph):
+        """The zero-slot message/hint must state the count the gate actually
+        applies: with `min: 2`, a user who follows a "wire one key" hint gets
+        rejected a second time by `autogrow_below_min`."""
+        wf = self._wf({"class_type": "AutogrowTopNode", "inputs": {}})
+        result = graph_dynamic.validate_workflow(wf)
+        err = next(e for e in result["errors"] if e["code"] == "autogrow_no_slots")
+        assert "places 2 of them in `required`" in err["message"]
+        assert "wire 2 key(s)" in err["hint"]
+
+    @pytest.mark.parametrize(
+        "bad",
+        [None, "", [], ["0", 0, 1], [["0", 0], ["0", 0], ["0", 0]]],
+        ids=["null", "empty-string", "empty-list", "three-tuple", "list-of-links"],
+    )
+    def test_base_key_wired_as_a_non_link_is_still_slot_checked(self, graph_dynamic: Graph, bad):
+        """Only a bare `[src, idx]` link is `autogrow_bare_input`, so only that
+        exact shape may skip the slot check. Any other value on the base key
+        raises no error anywhere else (`validate_shape` no-ops for
+        COMFY_AUTOGROW_V3 and `_check_required_present` exempts autogrow
+        ports), so skipping on mere presence silenced the check for free while
+        the server still rejected the node for the missing `images.image0`."""
+        wf = self._wf({"class_type": "AutogrowTopNode", "inputs": {"images": bad}})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        assert "autogrow_no_slots" in [e["code"] for e in result["errors"]]
+
+    def test_nested_undeclared_slot_key_is_not_waved_through(self, graph_dynamic: Graph):
+        """A key under the group's prefix that the template never declares is
+        not an input of the node at all — the server ignores it — so it owes an
+        `unknown_input` warning rather than being accepted by a bare prefix
+        match alongside the slots that ARE real."""
+        wf = self._wf(
+            {
+                "class_type": "AutogrowNestedNode",
+                "inputs": {
+                    "model": "strict",
+                    "model.refs.reference_1": ["0", 0],
+                    "model.refs.bogus": ["0", 0],
+                },
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["errors"] == []
+        assert [(w["code"], w["field"]) for w in result["warnings"]] == [("unknown_input", "model.refs.bogus")]
+
+    def test_unreadable_template_keeps_the_historical_required_check(self, graph: Graph):
+        """A template-less group (`BatchImagesNode.images`) carries no
+        `template_required` signal, so the zero-slot check falls back to
+        `port.required` rather than being silently dropped — but there is no
+        min to enforce beyond that, so one slot is enough."""
+        one_slot = {
+            "10": {"class_type": "VAEDecode", "inputs": {}},
+            "20": {"class_type": "BatchImagesNode", "inputs": {"images.image0": ["10", 0]}},
+            "30": {"class_type": "SaveImage", "inputs": {"images": ["20", 0], "filename_prefix": "out"}},
+        }
+        codes = [e["code"] for e in graph.validate_workflow(one_slot)["errors"] if e["node_id"] == "20"]
+        assert codes == []
+
+
+class TestAutogrowSchemaEdges:
+    """Reading the autogrow template itself: bounds that aren't numbers, a
+    template that declares no `min`, sections in an unexpected order, and a
+    `min` larger than the group's own capacity. Each is a shape the server
+    either handles differently from the frontend or does not accept at all, so
+    none of them may become a hard reject built on a number we synthesized."""
+
+    _INFO = """
+        {
+          "ImageSrc": {"input": {"required": {}}, "input_order": {"required": []},
+            "output": ["IMAGE"], "output_name": ["image"], "display_name": "S",
+            "python_module": "nodes"},
+          "Sink": {"input": {"required": {}, "optional": {"image": ["IMAGE", {}]}},
+            "input_order": {"required": [], "optional": ["image"]},
+            "output": [], "output_name": [], "output_node": true, "display_name": "K",
+            "python_module": "nodes"},
+          "Grow": {
+            "input": {"__SECTION__": {"images": ["COMFY_AUTOGROW_V3", {"template": __TEMPLATE__}]}},
+            "input_order": {"__SECTION__": ["images"]},
+            "output": ["IMAGE"], "output_name": ["IMAGE"], "display_name": "G",
+            "python_module": "nodes"}
+        }
+    """
+
+    def _graph(self, template: str, *, required_section: bool = True) -> Graph:
+        # Parsed the way the loader parses `/object_info` — plain `json.loads`,
+        # which accepts the bare `NaN`/`Infinity` literals a Python-serialized
+        # payload emits. Kept as raw text (not a dict) for exactly that reason.
+        raw = self._INFO.replace("__SECTION__", "required" if required_section else "optional").replace(
+            "__TEMPLATE__", template
+        )
+        return Graph.from_object_info(json.loads(raw))
+
+    def _wf(self, inputs: dict) -> dict:
+        return {
+            "0": {"class_type": "ImageSrc", "inputs": {}},
+            "1": {"class_type": "Grow", "inputs": inputs},
+            "2": {"class_type": "Sink", "inputs": {"image": ["1", 0]}},
+        }
+
+    IMAGE_TEMPLATE_INPUT = '{"required": {"image": ["IMAGE", {}]}}'
+
+    def _template(self, body: str, template_input: str | None = None) -> str:
+        """A `template` block with `input` prefilled — `body` is the rest of it
+        (`"prefix": ..., "min": ...`) verbatim."""
+        return '{"input": ' + (template_input or self.IMAGE_TEMPLATE_INPUT) + ", " + body + "}"
+
+    def test_non_finite_bounds_yield_a_diagnostic_not_a_crash(self):
+        """`json.loads` accepts `NaN`/`Infinity`, and `int()` raises
+        `ValueError`/`OverflowError` on them — a crash inside
+        `validate_workflow` and the `run` preflight where the validator owes a
+        diagnostic. Non-numeric bounds read as undeclared instead."""
+        graph = self._graph(self._template('"prefix": "image", "min": NaN, "max": Infinity'))
+        port = graph.node("Grow").inputs[0]
+        assert port.autogrow_declared_min is None
+        assert port.autogrow_limits == (1, None)  # the frontend's default min, no max
+        assert port.autogrow_effective_min == 0
+        # Still validates rather than raising, and still reports the historical
+        # zero-slot error through the `required` fallback.
+        result = graph.validate_workflow(self._wf({}))
+        assert [e["code"] for e in result["errors"]] == ["autogrow_no_slots"]
+        assert graph.validate_workflow(self._wf({"images.image0": ["0", 0]}))["valid"] is True
+
+    def test_a_template_declaring_no_min_is_not_a_hard_reject_on_a_synthesized_one(self):
+        """`autogrow_limits` substitutes the FRONTEND's default of 1 when the
+        template omits `min`; the server reads `template["min"]` with no
+        default at all. A hard reject naming a specific slot must not be built
+        on that guess, so an undeclared `min` reads as "cannot judge" and only
+        the historical zero-slot check applies."""
+        graph = self._graph(self._template('"prefix": "image", "max": 4'))
+        port = graph.node("Grow").inputs[0]
+        assert port.autogrow_limits[0] == 1  # frontend-faithful, unchanged
+        assert port.autogrow_declared_min is None
+        assert port.autogrow_effective_min == 0
+        # One slot wired — but not slot 0. A synthesized `min: 1` would demand
+        # `images.image0` by name; nothing declared that, so it stays clean.
+        assert graph.validate_workflow(self._wf({"images.image3": ["0", 0]}))["valid"] is True
+        assert [e["code"] for e in graph.validate_workflow(self._wf({}))["errors"]] == ["autogrow_no_slots"]
+
+    def test_optional_section_declared_first_wins_as_it_does_on_the_server(self):
+        """`_expand_schema_for_dynamic` iterates `input.items()` and takes the
+        first NON-EMPTY section, so a template listing `optional` ahead of
+        `required` reads `template_required = False` and the server ignores
+        `min` entirely. A hardcoded required-then-optional sweep read the
+        opposite and hard-rejected a node the server accepts."""
+        template_input = '{"optional": {"image": ["IMAGE", {}]}, "required": {"other": ["IMAGE", {}]}}'
+        graph = self._graph(self._template('"prefix": "image", "min": 2', template_input))
+        port = graph.node("Grow").inputs[0]
+        assert port.autogrow_template_required is False
+        assert port.autogrow_effective_min == 0
+        assert graph.validate_workflow(self._wf({}))["valid"] is True
+
+    def test_an_empty_leading_section_is_skipped_like_the_server_skips_it(self):
+        """`if len(dict_input) == 0: continue` — an empty `optional` declared
+        first does not make the group optional."""
+        template_input = '{"optional": {}, "required": {"image": ["IMAGE", {}]}}'
+        graph = self._graph(self._template('"prefix": "image", "min": 2', template_input))
+        port = graph.node("Grow").inputs[0]
+        assert port.autogrow_template_required is True
+        assert port.autogrow_effective_min == 2
+
+    def test_min_above_the_groups_capacity_is_clamped(self):
+        """The server promotes slots through `for i, name in enumerate(names)`,
+        so a `min` past the end of `names` simply never reaches those indices.
+        Demanding three slots from a group that grows one would be an error the
+        user cannot clear."""
+        graph = self._graph(self._template('"names": ["a"], "min": 3'))
+        port = graph.node("Grow").inputs[0]
+        assert port.autogrow_limits == (3, 1)
+        assert port.autogrow_effective_min == 1
+        assert graph.validate_workflow(self._wf({"images.a": ["0", 0]}))["valid"] is True
+
+    def test_declared_slot_keys_match_only_the_servers_own_spelling(self):
+        """`f"{prefix}{i}"` never emits `image01` or `image-1`, and `max: 4`
+        stops the expansion at `image3`."""
+        graph = self._graph(self._template('"prefix": "image", "min": 1, "max": 4'))
+        port = graph.node("Grow").inputs[0]
+        keys = ["images.image0", "images.image01", "images.image-1", "images.image4", "images.bogus", "other.image0"]
+        assert port.autogrow_declared_slot_keys(keys) == {"images.image0"}
+
+    def test_declared_slot_keys_survive_hostile_index_text(self):
+        """Slot names come from the prompt, so the index parse must not be
+        reachable with anything `int()` rejects: `isdigit()` is True for
+        superscripts, and `int()` raises outright above 4300 digits."""
+        graph = self._graph(self._template('"prefix": "image", "min": 1, "max": 4'))
+        port = graph.node("Grow").inputs[0]
+        keys = ["images.image\u00b2", "images.image" + "9" * 5000, "images.image1"]
+        assert port.autogrow_declared_slot_keys(keys) == {"images.image1"}
+
+    def test_a_definite_false_gate_is_an_answer_not_a_gap(self):
+        """A template whose inner input sits in `optional` tells us the server
+        ignores `min` outright — that is an answer, so it must NOT fall through
+        to the historical "at least one slot" gate the way an unreadable
+        template does, even when the template also declares no `min`."""
+        template_input = '{"optional": {"image": ["IMAGE", {}]}}'
+        graph = self._graph(self._template('"prefix": "image"', template_input))
+        port = graph.node("Grow").inputs[0]
+        assert port.autogrow_template_required is False
+        assert port.autogrow_declared_min is None
+        assert graph.validate_workflow(self._wf({}))["valid"] is True
+
+    def test_unreadable_template_still_errors_on_zero_slots(self):
+        """The other half of `test_unreadable_template_keeps_the_historical_required_check`:
+        a template with no `input` block gives no `template_required` signal,
+        so the zero-slot check falls back to the historical `required` gate —
+        but the declared `min: 2` never binds, and no hard error may name a
+        *specific* slot on a signal the catalog never gave."""
+        graph = self._graph('{"prefix": "image", "min": 2, "max": 4}')
+        port = graph.node("Grow").inputs[0]
+        assert port.autogrow_template_required is None
+        assert port.autogrow_effective_min == 0
+        assert [e["code"] for e in graph.validate_workflow(self._wf({}))["errors"]] == ["autogrow_no_slots"]
+        # One slot clears it — the declared `min: 2` is NOT enforced, because
+        # the signal that would make it binding is unreadable.
+        assert graph.validate_workflow(self._wf({"images.image3": ["0", 0]}))["valid"] is True
+
+    def test_unreadable_template_on_an_optional_input_is_not_checked_at_all(self):
+        """The historical gate is `required`; an optional autogrow input with
+        an unreadable template stays unchecked, as it always has."""
+        graph = self._graph('{"prefix": "image", "min": 2}', required_section=False)
+        assert graph.validate_workflow(self._wf({}))["valid"] is True
+
+    def test_declared_slot_keys_are_none_without_a_naming_template(self):
+        """No template to filter against — callers keep the historical prefix
+        match rather than filtering on a pluralization guess."""
+        graph = self._graph(self._template('"min": 1'))
+        assert graph.node("Grow").inputs[0].autogrow_declared_slot_keys(["images.image0"]) is None
+
+
+class TestAutogrowEffectiveMin:
+    """`Port.autogrow_effective_min` in isolation — the `template_required`
+    gate it mirrors, and the leniency it falls back to."""
+
+    def _port(self, spec) -> Port:
+        from comfy_cli.cql.engine import _port_from_spec
+
+        return _port_from_spec("images", spec, True)
+
+    def test_required_template_section_binds_min(self):
+        p = self._port(
+            [
+                "COMFY_AUTOGROW_V3",
+                {"template": {"input": {"required": {"image": ["IMAGE", {}]}}, "prefix": "image", "min": 2, "max": 4}},
+            ]
+        )
+        assert p.autogrow_effective_min == 2
+        assert p.autogrow_limits == (2, 4)
+
+    def test_optional_template_section_ignores_min(self):
+        p = self._port(
+            [
+                "COMFY_AUTOGROW_V3",
+                {"template": {"input": {"optional": {"image": ["IMAGE", {}]}}, "prefix": "image", "min": 2, "max": 4}},
+            ]
+        )
+        # `autogrow_limits` still reports the DECLARED min for display; only
+        # the effective (server-enforced) min is gated.
+        assert p.autogrow_limits == (2, 4)
+        assert p.autogrow_effective_min == 0
+
+    def test_declared_min_zero_binds_nothing(self):
+        p = self._port(
+            [
+                "COMFY_AUTOGROW_V3",
+                {"template": {"input": {"required": {"image": ["IMAGE", {}]}}, "names": ["a", "b"], "min": 0}},
+            ]
+        )
+        assert p.autogrow_effective_min == 0
+
+    def test_unreadable_template_reports_the_gate_as_unknown(self):
+        """An older/partial capture whose `min`/`names` sit BESIDE `template`
+        rather than inside it (the ByteDance Seedream v2 fixture shape) gives
+        no `template_required` signal at all. That must read as `None` — NOT
+        as a definite `False` — so `_check_autogrow_required` can tell "the
+        server ignores min here" apart from "we cannot tell" and keep its
+        historical `port.required` check for the latter."""
+        p = self._port(["COMFY_AUTOGROW_V3", {"template": {"image": ["IMAGE", {}]}, "names": ["a"], "min": 0}])
+        assert p.autogrow_template_required is None
+        assert p.autogrow_effective_min == 0
+        p2 = self._port(["COMFY_AUTOGROW_V3", {}])
+        assert p2.autogrow_template_required is None
+        assert p2.autogrow_effective_min == 0
+
+    def test_gate_is_a_definite_false_when_the_template_is_readable(self):
+        p = self._port(["COMFY_AUTOGROW_V3", {"template": {"input": {"optional": {"image": ["IMAGE", {}]}}, "min": 1}}])
+        assert p.autogrow_template_required is False
+
+    def test_non_autogrow_port_is_zero(self):
+        p = self._port(["INT", {"min": 3}])
+        assert p.autogrow_template_required is None
+        assert p.autogrow_effective_min == 0
+
+    def test_required_slot_names_from_a_prefix_template(self):
+        """The server expands `[f"{prefix}{i}" for i in range(max)]` and marks
+        the first `min` required — 0-based, exactly as this repo's own
+        converter names them (`workflow_ops._autogrow_elem_name`)."""
+        p = self._port(
+            [
+                "COMFY_AUTOGROW_V3",
+                {"template": {"input": {"required": {"image": ["IMAGE", {}]}}, "prefix": "image", "min": 2, "max": 4}},
+            ]
+        )
+        assert p.autogrow_required_slot_names(2) == ["image0", "image1"]
+
+    def test_required_slot_names_from_a_names_template(self):
+        p = self._port(
+            [
+                "COMFY_AUTOGROW_V3",
+                {
+                    "template": {
+                        "input": {"required": {"image": ["IMAGE", {}]}},
+                        "names": ["reference_1", "reference_2", "reference_3"],
+                        "min": 2,
+                    }
+                },
+            ]
+        )
+        assert p.autogrow_required_slot_names(2) == ["reference_1", "reference_2"]
+
+    def test_required_slot_names_clamp_to_the_declared_maximum(self):
+        """`enumerate(names)` can't run past the name list, so neither can
+        this — a `min` above `max` owes only the names that exist."""
+        p = self._port(
+            [
+                "COMFY_AUTOGROW_V3",
+                {"template": {"input": {"required": {"image": ["IMAGE", {}]}}, "prefix": "image", "min": 9, "max": 2}},
+            ]
+        )
+        assert p.autogrow_required_slot_names(9) == ["image0", "image1"]
+        names = self._port(
+            [
+                "COMFY_AUTOGROW_V3",
+                {"template": {"input": {"required": {"image": ["IMAGE", {}]}}, "names": ["a"], "min": 9}},
+            ]
+        )
+        assert names.autogrow_required_slot_names(9) == ["a"]
+
+    def test_required_slot_names_are_none_without_a_declared_template(self):
+        """No declared naming template means the only naming available is the
+        pluralization GUESS — too weak to hard-error on, so callers fall back
+        to counting."""
+        p = self._port(["COMFY_AUTOGROW_V3", {}])
+        assert p.autogrow_required_slot_names(2) is None
+        # …even though the exporter-facing property still supplies the guess.
+        assert p.autogrow_element_template == {"prefix": "image"}
+
+
 # ===========================================================================
 # `--input <dump>` is an offline path — annotation lookup must not reach out
 # ===========================================================================
@@ -3806,9 +4824,9 @@ class TestMatchTypeWildcard:
     """COMFY_MATCHTYPE_V3 is the V3 schema's generic port: its concrete type is
     resolved at runtime from whatever it is wired to. It was not recognised as a
     wildcard, so every edge touching one was reported as edge_type_mismatch —
-    ~30 spurious warnings in a single 48h prod window on graphs that were
-    correct (ComfySwitchNode, ResizeImageMaskNode). The agent explained them away
-    in nearly every reply, which teaches it to discount validator output.
+    spurious warnings on graphs that were correct (ComfySwitchNode,
+    ResizeImageMaskNode). An agent then explains them away in nearly every
+    reply, which teaches it to discount validator output.
     """
 
     @staticmethod
@@ -3894,13 +4912,13 @@ class TestMatchTypeWildcard:
     def test_future_matchtype_revisions_are_wildcards_too(self):
         """Prefix match, so a V4 match-type cannot silently reintroduce the
         false warnings this exists to prevent."""
-        from comfy_cli.cql.engine import _is_wildcard_type
+        from comfy_cli.cql.engine import is_wildcard_type
 
-        assert _is_wildcard_type("*")
-        assert _is_wildcard_type("COMFY_MATCHTYPE_V3")
-        assert _is_wildcard_type("COMFY_MATCHTYPE_V4")
-        assert not _is_wildcard_type("IMAGE")
-        assert not _is_wildcard_type("")
+        assert is_wildcard_type("*")
+        assert is_wildcard_type("COMFY_MATCHTYPE_V3")
+        assert is_wildcard_type("COMFY_MATCHTYPE_V4")
+        assert not is_wildcard_type("IMAGE")
+        assert not is_wildcard_type("")
 
 
 class TestMultiTypeEdge:
@@ -3910,11 +4928,10 @@ class TestMultiTypeEdge:
     ``INT,FLOAT`` input — a connection the frontend's ``isValidConnection``
     accepts and the server runs — was reported as ``edge_type_mismatch``.
 
-    Langfuse 2026-08-25..28: 23 ``edge_type_mismatch`` warnings across 55
-    validate calls, 12 of them exactly this shape (``input 'b' expects
-    INT,FLOAT but PrimitiveFloat[0] produces FLOAT``; ``input 'model_3d'
-    expects FILE_3D_GLB,FILE_3D_GLTF,… but MeshyImageToModelNode[2] produces
-    FILE_3D_GLB``). Shapes copied from the cloud catalog (``SimpleMath+``,
+    Typical warnings of this shape: ``input 'b' expects INT,FLOAT but
+    PrimitiveFloat[0] produces FLOAT``; ``input 'model_3d' expects
+    FILE_3D_GLB,FILE_3D_GLTF,… but MeshyImageToModelNode[2] produces
+    FILE_3D_GLB``. Shapes copied from the cloud catalog (``SimpleMath+``,
     ``PrimitiveFloat``).
     """
 
@@ -4272,10 +5289,9 @@ class TestUnreachableNodeIsVisible:
     check here skips pruned nodes — so such a graph could validate as
     "0 errors, 0 warnings" while doing nothing the author intended.
 
-    Prod repro: a depth-ControlNet whose output was never wired into the sampler
-    validated completely clean. The graph then ran twice, produced an image with
-    no pose applied, and cost two paid GPU runs and three turns of "it does
-    nothing" / "still no pose" before the dangling link was found.
+    Repro: a depth-ControlNet whose output was never wired into the sampler
+    validated completely clean. The graph would then run, produce an image with
+    no pose applied, and cost paid GPU runs before the dangling link was found.
     """
 
     @staticmethod
@@ -4364,3 +5380,673 @@ class TestUnreachableNodeIsVisible:
         assert any(e["code"] == "prompt_no_outputs" for e in result["errors"])
         warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
         assert warns == [], "prompt_no_outputs already says it; don't pile on"
+
+
+# ---------------------------------------------------------------------------
+# _subgraph_defs_by_id / _count_instances — corrupt definitions containers
+# ---------------------------------------------------------------------------
+
+
+class TestSubgraphDefsByIdShapeChecks:
+    """A hand-edited or truncated save can put anything under ``definitions``.
+
+    The old ``(workflow.get("definitions") or {}).get("subgraphs") or []`` only
+    replaced FALSY values, so a truthy wrong-typed one survived and crashed the
+    caller (``comfy workflow slots`` exited on a traceback with no envelope).
+    The agreed degradation is an empty index: a document with no readable
+    definitions has no subgraph instances to resolve, and every caller already
+    handles ``{}``.
+    """
+
+    @pytest.mark.parametrize(
+        "definitions",
+        [5, "definitions", ["x"], 0.0, True],
+        ids=["int", "str", "list", "float", "bool"],
+    )
+    def test_non_dict_definitions_reads_as_no_definitions(self, definitions):
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": definitions}) == {}
+
+    @pytest.mark.parametrize(
+        "subgraphs",
+        [5, {"a": 1}, 3.5, True],
+        ids=["int", "dict", "float", "bool"],
+    )
+    def test_non_list_subgraphs_reads_as_no_definitions(self, subgraphs):
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {"subgraphs": subgraphs}}) == {}
+
+    def test_string_subgraphs_is_not_walked_per_character(self):
+        """A string is iterable, so a naive guard silently walks it character by
+        character. It happens to yield ``{}`` too (single chars aren't dicts),
+        so this case documents INTENT: the isinstance branch must reject the
+        string outright rather than arrive at ``{}`` by accident."""
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {"subgraphs": "abc"}}) == {}
+
+    def test_missing_containers_still_read_as_empty(self):
+        assert _subgraph_defs_by_id({"nodes": []}) == {}
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": None}) == {}
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {}}) == {}
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {"subgraphs": []}}) == {}
+        # A top-level ``subgraphs`` with no ``definitions`` wrapper is not the
+        # block this helper reads; it must not be picked up by accident.
+        assert _subgraph_defs_by_id({"subgraphs": {"a": 1}}) == {}
+        assert _subgraph_defs_by_id({"subgraphs": [{"id": "u1"}]}) == {}
+
+    def test_well_formed_definitions_still_index_by_id_and_name(self):
+        """Positive control: the shape checks must not cost the happy path."""
+        wf = {"definitions": {"subgraphs": [{"id": "u1", "name": "A", "nodes": []}]}}
+        by_id = _subgraph_defs_by_id(wf)
+        assert by_id["u1"] is wf["definitions"]["subgraphs"][0]
+        assert by_id["A"] is wf["definitions"]["subgraphs"][0], "unambiguous name stays a fallback key"
+
+    def test_non_dict_entries_are_still_skipped(self):
+        """The per-entry guard is unchanged: junk beside a real def is dropped,
+        the real def is kept."""
+        wf = {"definitions": {"subgraphs": ["junk", None, 7, {"id": "u1", "name": "A", "nodes": []}]}}
+        assert set(_subgraph_defs_by_id(wf)) == {"u1", "A"}
+
+
+class TestCountInstancesShapeChecks:
+    def test_non_dict_definitions_counts_top_level_only(self):
+        wf = {"nodes": [{"id": 1, "type": "u1"}], "definitions": 5}
+        assert _count_instances(wf, "u1") == 1
+
+    def test_non_list_subgraphs_counts_top_level_only(self):
+        wf = {"nodes": [{"id": 1, "type": "u1"}], "definitions": {"subgraphs": "abc"}}
+        assert _count_instances(wf, "u1") == 1
+
+    def test_well_formed_definitions_still_count_interior_instances(self):
+        wf = {
+            "nodes": [{"id": 1, "type": "u1"}],
+            "definitions": {"subgraphs": [{"id": "u2", "nodes": [{"id": 9, "type": "u1"}]}]},
+        }
+        assert _count_instances(wf, "u1") == 2
+
+
+class TestSubgraphDefNodesShapeChecks:
+    """One level deeper: a def whose ``nodes`` is truthy but not a list.
+
+    Every caller walks ``sg.get("nodes") or []``, which only replaces a falsy
+    value, so ``{"nodes": 5}`` raised ``TypeError`` once an instance resolved
+    to it (``slots``) or once a sibling def was scanned (``_count_instances``).
+    """
+
+    @pytest.mark.parametrize("nodes", [5, True, "abc", {"a": 1}], ids=["int", "bool", "str", "dict"])
+    def test_def_with_non_list_nodes_is_not_indexed(self, nodes):
+        wf = {"definitions": {"subgraphs": [{"id": "bad", "nodes": nodes}, {"id": "u1", "nodes": []}]}}
+        assert set(_subgraph_defs_by_id(wf)) == {"u1"}
+
+    def test_def_with_missing_or_null_nodes_is_still_indexed(self):
+        wf = {"definitions": {"subgraphs": [{"id": "u1"}, {"id": "u2", "nodes": None}]}}
+        assert set(_subgraph_defs_by_id(wf)) == {"u1", "u2"}
+
+    def test_count_instances_skips_a_sibling_def_with_non_list_nodes(self):
+        wf = {
+            "nodes": [{"id": 1, "type": "u1"}],
+            "definitions": {"subgraphs": [{"id": "bad", "nodes": 5}, {"id": "u2", "nodes": [{"id": 9, "type": "u1"}]}]},
+        }
+        assert _count_instances(wf, "u1") == 2
+
+
+class TestAutogrowSlotPorts:
+    """Autogrow slot keys (``images.image0``, ``model.images.image_1``, …) are
+    type-, shape- and catalog-checked exactly as ordinary inputs are.
+
+    ``/object_info`` declares the GROUP and never its grown slots, so a slot key
+    never entered ``port_by_name``: a link-valued one got ``dangling_edge`` /
+    ``output_index_out_of_range`` but skipped the ``edge_type_mismatch``
+    comparison, and a plain-valued one fell out at ``if port is None: continue``
+    before any shape or catalog check. An ``INT`` wired into an ``IMAGE`` slot
+    validated clean here and was then hard-rejected by the server as
+    ``return_type_mismatch`` (``execution.validate_inputs`` →
+    ``validate_node_input`` on the expanded ``template_input``). Validation now
+    synthesizes one :class:`Port` per present, template-declared slot key from
+    the group's own template input.
+
+    ``Grow`` mirrors the live ``BatchImagesNode.images``
+    (``prefix: image``, ``min: 1``, ``max: 50``, inner ``IMAGE``).
+    """
+
+    INFO = {
+        "IntSrc": {
+            "input": {"required": {}},
+            "input_order": {"required": []},
+            "output": ["INT"],
+            "output_name": ["value"],
+            "display_name": "IntSrc",
+            "python_module": "nodes",
+        },
+        "ImgSrc": {
+            "input": {"required": {}},
+            "input_order": {"required": []},
+            "output": ["IMAGE"],
+            "output_name": ["image"],
+            "display_name": "ImgSrc",
+            "python_module": "nodes",
+        },
+        "Grow": {
+            "input": {
+                "required": {
+                    "images": [
+                        "COMFY_AUTOGROW_V3",
+                        {
+                            "template": {
+                                "input": {"required": {"image": ["IMAGE", {}]}},
+                                "prefix": "image",
+                                "min": 1,
+                                "max": 50,
+                            }
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["images"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "Grow",
+            "python_module": "nodes",
+        },
+        # Template inner type COMBO: the slot value is a catalog choice, so the
+        # synthesized port must inherit `enum_values`/`enum_declared`.
+        "GrowCombo": {
+            "input": {
+                "required": {
+                    "opts": [
+                        "COMFY_AUTOGROW_V3",
+                        {
+                            "template": {
+                                "input": {"required": {"choice": ["COMBO", {"options": ["a", "b"]}]}},
+                                "prefix": "opt",
+                                "min": 0,
+                            }
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["opts"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "GrowCombo",
+            "python_module": "nodes",
+        },
+        # Template inner type INT with a declared range: the synthesized port
+        # must inherit `options` so the range check applies to the slot.
+        "GrowInt": {
+            "input": {
+                "required": {
+                    "counts": [
+                        "COMFY_AUTOGROW_V3",
+                        {
+                            "template": {
+                                "input": {"required": {"count": ["INT", {"min": 1, "max": 10}]}},
+                                "prefix": "n",
+                                "min": 0,
+                            }
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["counts"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "GrowInt",
+            "python_module": "nodes",
+        },
+        # A template carrying no inner input at all: nothing declares the slot's
+        # type, so no port is synthesized and the historical "no port, no
+        # diagnostic" behaviour stands.
+        "GrowEmpty": {
+            "input": {
+                "required": {
+                    "blanks": [
+                        "COMFY_AUTOGROW_V3",
+                        {"template": {"input": {}, "prefix": "blank", "min": 0}},
+                    ]
+                }
+            },
+            "input_order": {"required": ["blanks"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "GrowEmpty",
+            "python_module": "nodes",
+        },
+        "Sink": {
+            "input": {"required": {"image": ["IMAGE", {}]}},
+            "input_order": {"required": ["image"]},
+            "output": [],
+            "output_name": [],
+            "output_node": True,
+            "display_name": "Sink",
+            "python_module": "nodes",
+        },
+        # Inner IMAGE type but no names/prefix: declared_slot_keys is None, so
+        # slots must not be typed by a prefix match (a typo like images.bogus
+        # used to pick up an IMAGE port and hard-error).
+        "GrowNoNames": {
+            "input": {
+                "required": {
+                    "images": [
+                        "COMFY_AUTOGROW_V3",
+                        {
+                            "template": {
+                                "input": {"required": {"image": ["IMAGE", {}]}},
+                                "min": 1,
+                            }
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["images"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "GrowNoNames",
+            "python_module": "nodes",
+        },
+        # Classic list-form COMBO as the template's first (and only) input —
+        # autogrow_template_input_spec must not skip it for lacking a string
+        # type_id.
+        "GrowListCombo": {
+            "input": {
+                "required": {
+                    "opts": [
+                        "COMFY_AUTOGROW_V3",
+                        {
+                            "template": {
+                                "input": {"required": {"choice": [["a", "b"], {}]}},
+                                "prefix": "opt",
+                                "min": 0,
+                            }
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["opts"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "GrowListCombo",
+            "python_module": "nodes",
+        },
+        # A group nested under a dynamic combo's selected option, with an
+        # inner type but no names/prefix: the nested twin of GrowNoNames.
+        "NestedNoNames": {
+            "input": {
+                "required": {
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {
+                                    "key": "m1",
+                                    "inputs": {
+                                        "required": {
+                                            "images": [
+                                                "COMFY_AUTOGROW_V3",
+                                                {
+                                                    "template": {
+                                                        "input": {"required": {"image": ["IMAGE", {}]}},
+                                                        "min": 0,
+                                                    }
+                                                },
+                                            ]
+                                        }
+                                    },
+                                }
+                            ]
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["model"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "NestedNoNames",
+            "python_module": "nodes",
+        },
+        # Same shape, list-form COMBO inner input: the slot type must read as
+        # the string "COMBO", never the choice list itself.
+        "NestedNoNamesListCombo": {
+            "input": {
+                "required": {
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {
+                                    "key": "m1",
+                                    "inputs": {
+                                        "required": {
+                                            "images": [
+                                                "COMFY_AUTOGROW_V3",
+                                                {
+                                                    "template": {
+                                                        "input": {"required": {"image": [["a", "b"], {}]}},
+                                                        "min": 0,
+                                                    }
+                                                },
+                                            ]
+                                        }
+                                    },
+                                }
+                            ]
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["model"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "NestedNoNamesListCombo",
+            "python_module": "nodes",
+        },
+    }
+
+    def _graph(self) -> Graph:
+        return Graph.from_object_info(self.INFO)
+
+    def _wf(self, class_type: str, inputs: dict) -> dict:
+        """`class_type` fed by an INT producer (`"0"`) and an IMAGE producer
+        (`"1"`), consumed by an output node so the node is output-reachable (the
+        server prunes anything else, and the range checks are gated on that).
+        Producers `inputs` doesn't reference are dropped, so an unused one
+        doesn't add `node_not_reachable_from_output` noise to the assertions."""
+        used = {str(v[0]) for v in inputs.values() if isinstance(v, list) and len(v) == 2}
+        producers = {
+            "0": {"class_type": "IntSrc", "inputs": {}},
+            "1": {"class_type": "ImgSrc", "inputs": {}},
+        }
+        return {
+            **{k: v for k, v in producers.items() if k in used},
+            "2": {"class_type": class_type, "inputs": inputs},
+            "3": {"class_type": "Sink", "inputs": {"image": ["2", 0]}},
+        }
+
+    # -- edges ------------------------------------------------------------
+
+    def test_int_source_into_an_image_slot_is_a_type_mismatch(self):
+        """The reported defect, top level: an INT output wired into
+        ``Grow.images.image0`` (template inner type ``IMAGE``) used to validate
+        clean and be hard-rejected by the server."""
+        result = self._graph().validate_workflow(self._wf("Grow", {"images.image0": ["0", 0]}))
+        errs = [e for e in result["errors"] if e["code"] == "edge_type_mismatch"]
+        assert len(errs) == 1
+        assert errs[0]["node_id"] == "2"
+        assert errs[0]["field"] == "images.image0"
+        assert "expects IMAGE but IntSrc[0] produces INT" in errs[0]["message"]
+        # Reachable type mismatches are hard errors (the server would reject
+        # the prompt); slot keys inherit that severity.
+        assert result["valid"] is False
+
+    def test_correctly_wired_slot_stays_clean(self):
+        result = self._graph().validate_workflow(self._wf("Grow", {"images.image0": ["1", 0]}))
+        assert result["valid"] is True, result["errors"]
+        assert result["warnings"] == []
+
+    def test_undeclared_slot_key_gets_no_synthesized_diagnostic(self):
+        """``images.bogus`` is not a name the template grows, so the server
+        never places it in the node's schema — no port is synthesized for it and
+        it draws no edge diagnostic (nor a crash). The top level has no
+        unknown-input check, so it stays silent there; the nested path keeps
+        reporting ``unknown_input`` (see ``test_nested_autogrow.py``)."""
+        result = self._graph().validate_workflow(
+            self._wf("Grow", {"images.image0": ["1", 0], "images.bogus": ["0", 0]})
+        )
+        assert result["errors"] == []
+        assert result["warnings"] == []
+
+    def test_dangling_slot_edge_keeps_its_existing_error(self):
+        """Regression pin: the checks a slot key ALREADY got must not change."""
+        result = self._graph().validate_workflow(self._wf("Grow", {"images.image0": ["99", 0]}))
+        err = next(e for e in result["errors"] if e["code"] == "dangling_edge")
+        assert err["field"] == "images.image0"
+
+    # -- shape / catalog --------------------------------------------------
+
+    def test_combo_template_slot_value_is_membership_checked(self):
+        """A COMBO template makes each slot a catalog choice; the synthesized
+        port inherits the option list, so an unknown value is the same
+        ``unknown_enum_value`` error any declared COMBO input gets."""
+        result = self._graph().validate_workflow(self._wf("GrowCombo", {"opts.opt0": "zzz"}))
+        errs = [e for e in result["errors"] if e["code"] == "unknown_enum_value"]
+        assert len(errs) == 1
+        assert errs[0]["node_id"] == "2"
+        assert errs[0]["field"] == "opts.opt0"
+
+    def test_combo_template_slot_value_in_the_enum_is_clean(self):
+        result = self._graph().validate_workflow(self._wf("GrowCombo", {"opts.opt0": "a"}))
+        assert result["valid"] is True, result["errors"]
+        assert result["warnings"] == []
+
+    def test_ranged_int_template_slot_value_is_range_checked(self):
+        """A ranged INT template makes each slot range-checked: ``min: 1`` with
+        a slot value of ``0`` is the same ``below_min`` error a declared INT
+        input gets."""
+        result = self._graph().validate_workflow(self._wf("GrowInt", {"counts.n0": 0}))
+        errs = [e for e in result["errors"] if e["code"] == "below_min"]
+        assert len(errs) == 1
+        assert errs[0]["field"] == "counts.n0"
+
+    def test_int_template_slot_shape_is_checked(self):
+        result = self._graph().validate_workflow(self._wf("GrowInt", {"counts.n0": "five"}))
+        errs = [e for e in result["errors"] if e["code"] == "shape_mismatch"]
+        assert len(errs) == 1
+        assert errs[0]["field"] == "counts.n0"
+
+    def test_template_with_no_inner_input_synthesizes_nothing(self):
+        """Nothing declares the slot's type, so there is nothing to check it
+        against — no port, no diagnostic, no crash."""
+        result = self._graph().validate_workflow(
+            self._wf("GrowEmpty", {"blanks.blank0": ["0", 0], "blanks.blank1": "anything"})
+        )
+        assert result["errors"] == []
+        assert result["warnings"] == []
+
+    # -- the synthesized ports themselves ---------------------------------
+
+    def test_autogrow_slot_port_reads_the_template_input(self):
+        graph = self._graph()
+        grow = graph.node("Grow")
+        assert grow is not None
+        port = next(p for p in grow.inputs if p.name == "images")
+        slot = port.autogrow_slot_port("images.image0", required=True)
+        assert slot is not None
+        assert (slot.name, slot.type, slot.required) == ("images.image0", "IMAGE", True)
+
+    def test_autogrow_slot_port_is_none_without_a_template_input(self):
+        graph = self._graph()
+        empty = graph.node("GrowEmpty")
+        sink = graph.node("Sink")
+        assert empty is not None and sink is not None
+        blanks = next(p for p in empty.inputs if p.name == "blanks")
+        assert blanks.autogrow_slot_port("blanks.blank0", required=False) is None
+        # A non-autogrow port has no template to read at all.
+        image = next(p for p in sink.inputs if p.name == "image")
+        assert image.autogrow_slot_port("image.x", required=False) is None
+
+    def test_slot_ports_mark_the_servers_required_slot_names_required(self):
+        """``required`` per slot is the server's own answer — the names it
+        places in the expanded schema's ``required`` section (``names[:min]``),
+        not merely the first ``min`` keys the prompt happens to wire."""
+        from comfy_cli.cql.engine import _autogrow_slot_ports
+
+        graph = self._graph()
+        grow = graph.node("Grow")
+        assert grow is not None
+        port = next(p for p in grow.inputs if p.name == "images")
+        ports = _autogrow_slot_ports("images", port, ["images.image0", "images.image1"])
+        # `min: 1` with the inner input in the template's own `required`
+        # section, so only slot 0 is required.
+        assert ports["images.image0"].required is True
+        assert ports["images.image1"].required is False
+
+    def test_slot_ports_inherit_the_template_enum_and_options(self):
+        from comfy_cli.cql.engine import _autogrow_slot_ports
+
+        graph = self._graph()
+        combo, ranged = graph.node("GrowCombo"), graph.node("GrowInt")
+        assert combo is not None and ranged is not None
+        opts = next(p for p in combo.inputs if p.name == "opts")
+        slot = _autogrow_slot_ports("opts", opts, ["opts.opt0"])["opts.opt0"]
+        assert slot.type == "COMBO"
+        assert slot.enum_values == ["a", "b"]
+        assert slot.enum_declared is True
+        counts = next(p for p in ranged.inputs if p.name == "counts")
+        int_slot = _autogrow_slot_ports("counts", counts, ["counts.n0"])["counts.n0"]
+        assert (int_slot.options.min, int_slot.options.max) == (1, 10)
+
+    def test_slot_ports_skip_keys_the_template_never_declares(self):
+        """The filter is the caller's (``autogrow_declared_slot_keys``), but the
+        helper must not invent a port for a key it is handed either — it types
+        exactly the keys it is given, and the driver only ever hands it declared
+        ones."""
+        from comfy_cli.cql.engine import _autogrow_slot_ports
+
+        graph = self._graph()
+        grow = graph.node("Grow")
+        assert grow is not None
+        port = next(p for p in grow.inputs if p.name == "images")
+        assert port.autogrow_declared_slot_keys(["images.image0", "images.bogus"]) == {"images.image0"}
+        assert set(_autogrow_slot_ports("images", port, ["images.image0"])) == {"images.image0"}
+
+    def test_no_naming_template_does_not_synthesize_ports_for_typo_keys(self):
+        """When the catalog names no slots, a prefix match must not invent a
+        type for `images.bogus` (or a deeper key). That's the reject-what-you-
+        cannot-read inversion: a typo used to hard-error as `edge_type_mismatch`
+        instead of staying silent at the top level."""
+        result = self._graph().validate_workflow(
+            self._wf("GrowNoNames", {"images.image0": ["1", 0], "images.bogus": ["0", 0]})
+        )
+        assert result["errors"] == []
+        assert result["warnings"] == []
+
+    def test_list_form_combo_template_is_membership_checked(self):
+        """A classic list-form COMBO (`[["a", "b"], {}]`) is a usable template
+        input; skipping it for lacking a string type_id used to leave the slot
+        untyped (and could pick up a later input's spec)."""
+        result = self._graph().validate_workflow(self._wf("GrowListCombo", {"opts.opt0": "zzz"}))
+        errs = [e for e in result["errors"] if e["code"] == "unknown_enum_value"]
+        assert len(errs) == 1
+        assert errs[0]["field"] == "opts.opt0"
+        clean = self._graph().validate_workflow(self._wf("GrowListCombo", {"opts.opt0": "a"}))
+        assert clean["valid"] is True, clean["errors"]
+
+    def test_nested_no_naming_template_does_not_infer_a_slot_type(self):
+        """The nested twin of the no-naming case: `model.images.bogus` under a
+        group with no names/prefix gets no inferred IMAGE type, so an INT link
+        into it is not an `edge_type_mismatch`, and a literal on it is not a
+        `literal_on_link_input`."""
+        wf = self._wf("NestedNoNames", {"model": "m1", "model.images.bogus": ["0", 0]})
+        result = self._graph().validate_workflow(wf)
+        assert [e for e in result["errors"] if e["code"] == "edge_type_mismatch"] == []
+        assert [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"] == []
+        assert result["valid"] is True, result["errors"]
+        literal = self._graph().validate_workflow(self._wf("NestedNoNames", {"model": "m1", "model.images.bogus": "x"}))
+        codes = {f["code"] for f in literal["errors"] + literal["warnings"]}
+        assert "literal_on_link_input" not in codes
+
+    def test_nested_list_form_combo_slot_link_does_not_crash(self):
+        """A linked nested slot under a no-naming list-form COMBO template used
+        to reach `Port.type = ["a", "b"]` and raise `TypeError: unhashable
+        type: 'list'` in the edge check."""
+        wf = self._wf("NestedNoNamesListCombo", {"model": "m1", "model.images.image0": ["1", 0]})
+        result = self._graph().validate_workflow(wf)
+        assert [e for e in result["errors"] if e["code"] == "edge_type_mismatch"] == []
+
+    def test_list_form_combo_element_type_is_the_combo_type_string(self):
+        graph = self._graph()
+        grow = graph.node("GrowListCombo")
+        assert grow is not None
+        opts = next(p for p in grow.inputs if p.name == "opts")
+        assert opts.autogrow_element_type == "COMBO"
+
+    def test_slot_ports_are_empty_when_there_are_no_slots(self):
+        """A prefix template with a huge min and no max must not expand a
+        billion-element required-names list just to type zero slots."""
+        from comfy_cli.cql.engine import _MAX_AUTOGROW_NAMES, _autogrow_slot_ports, _port_from_spec
+
+        port = _port_from_spec(
+            "images",
+            [
+                "COMFY_AUTOGROW_V3",
+                {
+                    "template": {
+                        "input": {"required": {"image": ["IMAGE", {}]}},
+                        "prefix": "image",
+                        "min": 10**9,
+                    }
+                },
+            ],
+            True,
+        )
+        assert _autogrow_slot_ports("images", port, []) == {}
+        names = port.autogrow_required_slot_names(port.autogrow_effective_min)
+        assert names is not None
+        assert len(names) == _MAX_AUTOGROW_NAMES
+        assert names[0] == "image0"
+        assert names[-1] == f"image{_MAX_AUTOGROW_NAMES - 1}"
+
+    def test_template_input_spec_skips_nested_autogrow_and_dynamic_combo(self):
+        from comfy_cli.cql.engine import _port_from_spec
+
+        nested = _port_from_spec(
+            "images",
+            [
+                "COMFY_AUTOGROW_V3",
+                {
+                    "template": {
+                        "input": {"required": {"inner": ["COMFY_AUTOGROW_V3", {"template": {}}]}},
+                        "prefix": "image",
+                    }
+                },
+            ],
+            True,
+        )
+        assert nested.autogrow_template_input_spec is None
+        assert nested.autogrow_slot_port("images.image0", required=False) is None
+        combo = _port_from_spec(
+            "images",
+            [
+                "COMFY_AUTOGROW_V3",
+                {
+                    "template": {
+                        "input": {
+                            "required": {"sel": ["COMFY_DYNAMICCOMBO_V3", {"options": [{"key": "a", "inputs": {}}]}]}
+                        },
+                        "prefix": "image",
+                    }
+                },
+            ],
+            True,
+        )
+        assert combo.autogrow_template_input_spec is None
+
+    def test_template_input_spec_normalizes_a_tuple_wrapper(self):
+        """`_parse_input_spec` only understands str/list; a tuple wrapper must
+        not yield a Port typed UNKNOWN (and a false edge_type_mismatch)."""
+        from comfy_cli.cql.engine import _port_from_spec
+
+        port = _port_from_spec(
+            "images",
+            [
+                "COMFY_AUTOGROW_V3",
+                {"template": {"input": {"required": {"image": ("IMAGE", {})}}, "prefix": "image"}},
+            ],
+            True,
+        )
+        spec = port.autogrow_template_input_spec
+        assert isinstance(spec, list)
+        assert spec[0] == "IMAGE"
+        slot = port.autogrow_slot_port("images.image0", required=False)
+        assert slot is not None
+        assert slot.type == "IMAGE"
+
+    def test_slot_ports_share_one_parsed_template_port(self):
+        from comfy_cli.cql.engine import _autogrow_slot_ports
+
+        graph = self._graph()
+        combo = graph.node("GrowCombo")
+        assert combo is not None
+        opts = next(p for p in combo.inputs if p.name == "opts")
+        ports = _autogrow_slot_ports("opts", opts, ["opts.opt0", "opts.opt1"])
+        assert ports["opts.opt0"].enum_values is ports["opts.opt1"].enum_values
+        assert ports["opts.opt0"].options is ports["opts.opt1"].options
+        assert ports["opts.opt0"].name == "opts.opt0"
+        assert ports["opts.opt1"].name == "opts.opt1"

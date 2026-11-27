@@ -9,6 +9,8 @@ websocket/HTTP code).
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -32,17 +34,22 @@ class TestExecuteSubmitsPreloadedGraph:
     """`preloaded` short-circuits file loading; the in-memory graph is what
     reaches the submit path (WorkflowExecution)."""
 
+    @pytest.fixture(autouse=True)
+    def preloaded_catalog(self):
+        """Validate the injected graph against a frozen catalog, without a server."""
+        catalog = json.loads((Path(__file__).resolve().parents[1] / "fixtures/sd15_object_info.json").read_text())
+        with patch("comfy_cli.command.run._fetch_object_info", return_value=catalog):
+            yield
+
     def test_preloaded_graph_is_submitted(self):
-        injected = {
-            "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "a red fox in snow"}},
-            "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0]}},
-        }
+        injected = build_default_workflow(prompt="a red fox in snow")
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
             patch("comfy_cli.command.run.ExecutionProgress"),
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
 
@@ -62,13 +69,13 @@ class TestExecuteSubmitsPreloadedGraph:
 
     def test_preloaded_skips_file_loading(self):
         """A non-existent path never triggers workflow_not_found when preloaded."""
-        injected = {"9": {"class_type": "SaveImage", "inputs": {}}}
+        injected = build_default_workflow(prompt="fox")
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
             patch("comfy_cli.command.run.ExecutionProgress"),
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
-            MockExec.return_value = MagicMock(outputs=[])
+            MockExec.return_value = MagicMock(outputs=[], borrowed_client_id=False)
             # Positional workflow is a bogus path — must be ignored.
             execute(
                 "/no/such/file.json",
@@ -169,7 +176,7 @@ class TestRuntimeCheckpointResolutionLocal:
             patch("comfy_cli.command.run.WorkflowExecution"),
         ]
         with stack[0], stack[1], stack[2], stack[3], stack[4] as MockExec:
-            MockExec.return_value = MagicMock(outputs=[])
+            MockExec.return_value = MagicMock(outputs=[], borrowed_client_id=False)
             if patch_pprint:
                 with patch("comfy_cli.command.run.preflight.pprint") as mock_pprint:
                     execute(None, host="127.0.0.1", port=8188, wait=True, timeout=30, preloaded=preloaded)

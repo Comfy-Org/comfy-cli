@@ -49,9 +49,10 @@ def test_build_flux_text_to_image_class_type_and_params():
     assert wf["1"]["inputs"]["model.width"] == 512
     assert wf["1"]["inputs"]["model.height"] == 768
     # save node references the partner output
-    save = [n for n in wf.values() if n["class_type"] == "SaveImage"]
+    save = [n for n in wf.values() if n["class_type"] == "SaveImageAdvanced"]
     assert len(save) == 1
     assert save[0]["inputs"]["images"] == ["1", 0]
+    assert save[0]["inputs"]["format"] == "png"
 
 
 def test_build_nano_banana_wires_load_image():
@@ -199,7 +200,7 @@ def test_build_flux_ultra_folds_width_height_into_aspect_ratio():
     assert wf["1"]["inputs"]["aspect_ratio"] == "1024:768"
     assert wf["1"]["inputs"]["prompt"] == "a fox"
     assert wf["1"]["inputs"]["prompt_upsampling"] is False
-    save = [n for n in wf.values() if n["class_type"] == "SaveImage"]
+    save = [n for n in wf.values() if n["class_type"] == "SaveImageAdvanced"]
     assert len(save) == 1
     assert save[0]["inputs"]["images"] == ["1", 0]
 
@@ -207,6 +208,26 @@ def test_build_flux_ultra_folds_width_height_into_aspect_ratio():
 def test_build_flux_ultra_without_width_height_keeps_default_aspect_ratio():
     wf = emit.build_workflow("flux-ultra", {"prompt": "a fox"})
     assert wf["1"]["inputs"]["aspect_ratio"] == "16:9"
+
+
+def test_build_flux_ultra_carries_the_endpoints_own_flags():
+    """The endpoint takes aspect_ratio/raw/prompt_upsampling/image_prompt_strength
+    directly, and each is a widget on the node, so emit must carry them."""
+    wf = emit.build_workflow(
+        "flux-ultra",
+        {
+            "prompt": "a fox",
+            "aspect_ratio": "1:1",
+            "raw": True,
+            "prompt_upsampling": True,
+            "image_prompt_strength": 0.5,
+        },
+    )
+    inputs = wf["1"]["inputs"]
+    assert inputs["aspect_ratio"] == "1:1"
+    assert inputs["raw"] is True
+    assert inputs["prompt_upsampling"] is True
+    assert inputs["image_prompt_strength"] == 0.5
 
 
 def test_build_flux_ultra_only_width_errors_instead_of_dropping_it():
@@ -241,7 +262,7 @@ def test_emit_refuses_a_flag_the_node_cannot_carry():
 def test_emit_names_every_unsupported_flag_at_once():
     """Reporting one at a time turns a single fix into a guessing loop."""
     with pytest.raises(emit.EmitError) as ei:
-        emit.build_workflow("flux-2", {"prompt": "p", "safety_tolerance": 2, "output_format": "png"})
+        emit.build_workflow("flux-2", {"prompt": "p", "safety_tolerance": 2, "output_format": "jpeg"})
     msg = str(ei.value)
     assert "--output_format" in msg and "--safety_tolerance" in msg
     assert "Drop those flags" in msg
@@ -276,7 +297,7 @@ EMIT_REFUSED_FLAGS = {
         "prompt_upsampling",
         "safety_tolerance",
     ],
-    "flux-ultra": ["guidance_scale", "negative_prompt", "num_images", "num_inference_steps"],
+    "flux-ultra": ["image_prompt", "output_format", "safety_tolerance", "webhook_secret", "webhook_url"],
     "kling-i2v": [
         "callback_url",
         "camera_control",
@@ -289,6 +310,7 @@ EMIT_REFUSED_FLAGS = {
         "shot_type",
         "sound",
         "static_mask",
+        "voice_list",
         "watermark_info",
     ],
     "nano-banana": [],
@@ -362,7 +384,7 @@ def test_unsupported_model_raises_a_typed_error_carrying_the_supported_list():
 
 
 def test_cli_emit_unsupported_model_has_its_own_error_code(runner, tmp_path, monkeypatch):
-    """The prod payload: `generate_workflow flux-pro` → `emit_workflow_failed`
+    """`--emit-workflow` on `flux-pro` → `emit_workflow_failed`
     "--emit-workflow does not support model 'flux-pro'. Supported: …". The
     umbrella code also covers bad params and unwritable paths, so the agent
     could not tell "pick another model" from "fix your arguments". Now it is
@@ -379,6 +401,7 @@ def test_cli_emit_unsupported_model_has_its_own_error_code(runner, tmp_path, mon
     assert err["code"] == "emit_workflow_unsupported_model"
     assert err["details"]["model"] == "flux-pro"
     assert err["details"]["supported"] == emit.supported_models()
+    assert err["details"]["suggested"][0] == "flux-2"
     assert "generate list" in err["hint"]
     assert not out.exists()
 
@@ -466,7 +489,7 @@ def test_cli_emit_output_prefix(runner, tmp_path, monkeypatch):
     )
     assert r.exit_code == 0, r.stdout
     wf = json.loads(out.read_text())
-    save = next(n for n in wf.values() if n["class_type"] == "SaveImage")
+    save = next(n for n in wf.values() if n["class_type"] == "SaveImageAdvanced")
     assert save["inputs"]["filename_prefix"] == "myfox"
 
 
@@ -477,19 +500,38 @@ def test_build_workflow_single_element_list_unwraps():
     assert not any(n["class_type"] == "ImageBatch" for n in wf.values())
 
 
-def test_build_workflow_two_images_chains_imagebatch():
+def test_build_workflow_two_images_fold_into_one_batch_images_node():
     wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": ["a.jpg", "b.jpg"]})
     loaders = {i: n for i, n in wf.items() if n["class_type"] == "LoadImage"}
-    batches = {i: n for i, n in wf.items() if n["class_type"] == "ImageBatch"}
+    batches = {i: n for i, n in wf.items() if n["class_type"] == "BatchImagesNode"}
     assert len(loaders) == 2 and len(batches) == 1
+    assert not any(n["class_type"] == "ImageBatch" for n in wf.values())
     ((batch_id, batch),) = batches.items()
-    assert {batch["inputs"]["image1"][0], batch["inputs"]["image2"][0]} == set(loaders)
+    assert batch["inputs"] == {"images.image0": ["2", 0], "images.image1": ["3", 0]}
+    assert [loaders[i]["inputs"]["image"].rsplit("/", 1)[-1] for i in ("2", "3")] == ["a.jpg", "b.jpg"]
     assert wf["1"]["inputs"]["images"] == [batch_id, 0]
 
 
-def test_build_workflow_three_images_chains_two_batches():
+def test_build_workflow_three_images_use_one_node_with_three_slots():
     wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": ["a.jpg", "b.jpg", "c.jpg"]})
-    batches = [i for i, n in wf.items() if n["class_type"] == "ImageBatch"]
-    assert len(batches) == 2
-    # terminal batch feeds the partner node
-    assert wf["1"]["inputs"]["images"][0] in batches
+    batches = [i for i, n in wf.items() if n["class_type"] == "BatchImagesNode"]
+    assert len(batches) == 1
+    assert sorted(wf[batches[0]]["inputs"]) == ["images.image0", "images.image1", "images.image2"]
+    assert wf["1"]["inputs"]["images"] == [batches[0], 0]
+
+
+def test_build_workflow_refuses_an_empty_image_list():
+    # `--image '[]'` parses as an empty list. It used to crash on loader_ids[0];
+    # a BatchImagesNode with no slots would break the group's min of 1.
+    with pytest.raises(emit.EmitError, match="--image"):
+        emit.build_workflow("nano-banana", {"prompt": "p", "image": []})
+
+
+def test_build_workflow_refuses_more_images_than_batch_images_node_takes():
+    # BatchImagesNode's autogrow group allows at most 50 slots.
+    paths = [f"{i}.png" for i in range(emit._BATCH_IMAGES_MAX + 1)]
+    with pytest.raises(emit.EmitError, match="at most 50"):
+        emit.build_workflow("nano-banana", {"prompt": "p", "image": paths})
+    wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": paths[:-1]})
+    (batch,) = [n for n in wf.values() if n["class_type"] == "BatchImagesNode"]
+    assert len(batch["inputs"]) == 50

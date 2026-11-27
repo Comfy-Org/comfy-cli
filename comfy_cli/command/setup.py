@@ -343,17 +343,23 @@ def _auth_browser(console) -> bool:
         # to a failed sign-in instead of an unhandled traceback.
         return False
 
-    store.save_cloud_session(
-        base_url=result.base_url,
-        resource=result.resource,
-        client_id=result.client_id,
-        scope=result.scope,
-        access_token=result.tokens.access_token,
-        refresh_token=result.tokens.refresh_token,
-        token_type=result.tokens.token_type,
-        expires_at=result.tokens.expires_at,
-    )
+    from comfy_cli import locking
+    from comfy_cli.cloud import partner_token
 
+    with locking.file_lock(store.lock_path()):
+        replaced_record = store.get_partner_node_token()
+        store.save_cloud_session(
+            base_url=result.base_url,
+            resource=result.resource,
+            client_id=result.client_id,
+            scope=result.scope,
+            access_token=result.tokens.access_token,
+            refresh_token=result.tokens.refresh_token,
+            token_type=result.tokens.token_type,
+            expires_at=result.tokens.expires_at,
+        )
+
+    partner_token.warn_if_replaced_token_kept(get_renderer(), partner_token.revoke_replaced(replaced_record))
     pprint("  [bold green]✓[/bold green] Signed in to Comfy Cloud")
     return True
 

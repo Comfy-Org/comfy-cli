@@ -212,3 +212,12 @@ def test_select_is_pure_and_does_not_mutate():
     select(PAYLOAD, "nope")
     selected_payload(PAYLOAD, "a..b")
     assert json.dumps(PAYLOAD, sort_keys=True) == snapshot
+
+
+def test_a_row_query_whose_projection_misses_every_kept_element_is_a_miss():
+    from comfy_cli.selector import select
+
+    data = {"rows": [{"name": "a"}, {"name": "b"}]}
+    assert select(data, 'rows.#(name=="a")#.nope') == (None, False)
+    assert select(data, 'rows.#(name=="zzz")#.nope') == ([], True)
+    assert select(data, 'rows.#(name%"*")#.name') == (["a", "b"], True)

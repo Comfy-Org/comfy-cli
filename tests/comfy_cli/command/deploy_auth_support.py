@@ -28,6 +28,11 @@ ENDPOINT_ORIGIN = f"https://{DEPLOYMENT_ID}.run.comfy.app"
 
 class DeployFixtureKind(Enum):
     UP = "up"
+    PROMOTE = "promote"
+    ROLLBACK = "rollback"
+    RENAME = "rename"
+    HISTORY = "history"
+    CANCEL = "cancel"
     STATUS = "status"
     LS = "ls"
     SHOW = "show"
@@ -39,6 +44,9 @@ class DeployFixtureKind(Enum):
     DELETE = "delete"
     RUN = "run"
     REFS_COMPUTE = "refs compute"
+    MODELS_ADD = "models add"
+    MODELS_LS = "models ls"
+    MODELS_RM = "models rm"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +69,25 @@ def _deployment() -> JsonObject:
         "computeConfig": {"gpuClass": "l4", "region": "US-MO-2", "min": 0, "max": 1},
         "endpointUrl": ENDPOINT_ORIGIN,
         "serving": None,
+        "revision": 2,
     }
+
+
+def _model() -> JsonObject:
+    return {"id": "model-matrix", "type": "loras", "filename": "lora.safetensors", "status": "ready", "sizeBytes": 7}
+
+
+def _revisions() -> list[JsonObject]:
+    return [
+        {
+            "revision": number,
+            "releaseId": RELEASE_ID,
+            "kind": kind,
+            "createdBy": "u",
+            "createdAt": "2026-01-01T00:00:00Z",
+        }
+        for number, kind in ((1, "create"), (2, "update"))
+    ]
 
 
 class DeployRecordingTransport:
@@ -85,6 +111,16 @@ class DeployRecordingTransport:
         routes: dict[tuple[str, str], tuple[int, JsonObject]] = {
             ("GET", "/v1/deployments"): (200, {"deployments": [row]}),
             ("GET", f"/v1/deployments/{DEPLOYMENT_ID}"): (200, row),
+            ("GET", "/v1/deployments/dep-source"): (200, {**row, "id": "dep-source"}),
+            ("GET", f"/v1/deployments/{DEPLOYMENT_ID}/revisions"): (200, {"items": _revisions()}),
+            ("POST", f"/v1/deployments/{DEPLOYMENT_ID}/rollback"): (
+                200,
+                {"id": DEPLOYMENT_ID, "revision": 2, "releaseId": RELEASE_ID, "kind": "update"},
+            ),
+            ("DELETE", f"/v1/deployments/{DEPLOYMENT_ID}/pending-update"): (
+                200,
+                {**row, "cancelledUpdate": {"releaseId": RELEASE_ID, "baseRevision": 1, "kind": "update"}},
+            ),
             ("POST", f"/v1/deployments/{DEPLOYMENT_ID}/stop"): (202, {**row, "status": "stopping"}),
             ("POST", f"/v1/deployments/{DEPLOYMENT_ID}/start"): (202, {**row, "status": "queued"}),
             ("DELETE", f"/v1/deployments/{DEPLOYMENT_ID}"): (204, {}),
@@ -97,9 +133,16 @@ class DeployRecordingTransport:
                 {"deploymentId": DEPLOYMENT_ID, "events": []},
             ),
             ("GET", "/v1/compute-catalog"): (200, {"regions": []}),
+            ("GET", f"/v1/deployments/{DEPLOYMENT_ID}/models"): (200, {"models": [_model()]}),
+            ("POST", f"/v1/deployments/{DEPLOYMENT_ID}/models"): (202, {**_model(), "status": "adding"}),
+            ("DELETE", f"/v1/deployments/{DEPLOYMENT_ID}/models/model-matrix"): (
+                202,
+                {**_model(), "status": "removing"},
+            ),
+            ("GET", "/v1/limits"): (200, {"maxActiveDeployments": 3, "maxModelStorageGb": 100}),
         }
         if method == "PATCH" and path == f"/v1/deployments/{DEPLOYMENT_ID}":
-            return 200, copy.deepcopy(row)
+            return 200, copy.deepcopy({**row, **(body or {})})
         route = routes.get((method, path))
         if route is None:
             pytest.fail(f"unexpected deploy control-plane call: {method} {url}")
@@ -140,6 +183,16 @@ def prepare_deploy(kind: DeployFixtureKind, root: Path) -> list[str]:
     match kind:
         case DeployFixtureKind.UP:
             return ["deploy", "up", "--release", RELEASE_ID, "--gpu", "l4", "--region", "US-MO-2"]
+        case DeployFixtureKind.PROMOTE:
+            return ["deploy", "promote", "dep-source", DEPLOYMENT_ID, "--no-watch"]
+        case DeployFixtureKind.ROLLBACK:
+            return ["deploy", "rollback", "--deployment", DEPLOYMENT_ID, "--no-watch"]
+        case DeployFixtureKind.RENAME:
+            return ["deploy", "rename", "--deployment", DEPLOYMENT_ID, "canary"]
+        case DeployFixtureKind.HISTORY:
+            return ["deploy", "history", "--deployment", DEPLOYMENT_ID]
+        case DeployFixtureKind.CANCEL:
+            return ["deploy", "cancel", "--deployment", DEPLOYMENT_ID]
         case DeployFixtureKind.STATUS:
             write_spec(root, build_id=BUILD_ID, models=[], nodes=[])
             return ["deploy", "status", str(root)]
@@ -171,6 +224,15 @@ def prepare_deploy(kind: DeployFixtureKind, root: Path) -> list[str]:
             ]
         case DeployFixtureKind.REFS_COMPUTE:
             return ["deploy", "refs", "compute"]
+        case DeployFixtureKind.MODELS_ADD:
+            root.mkdir(parents=True, exist_ok=True)
+            model = root / "lora.safetensors"
+            model.write_bytes(b"weights")
+            return ["deploy", "models", "add", DEPLOYMENT_ID, str(model), "--type", "loras", "--no-wait"]
+        case DeployFixtureKind.MODELS_LS:
+            return ["deploy", "models", "ls", DEPLOYMENT_ID]
+        case DeployFixtureKind.MODELS_RM:
+            return ["deploy", "models", "rm", DEPLOYMENT_ID, "lora.safetensors", "--yes"]
         case unreachable:
             assert_never(unreachable)
 

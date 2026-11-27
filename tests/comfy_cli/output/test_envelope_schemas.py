@@ -49,6 +49,8 @@ def _validator_for(name: str) -> jsonschema.Validator:
         "which.json",
         "run.json",
         "run_event.json",
+        # Three event types, each with its own required set behind an `if`/`then`.
+        "build_push_event.json",
         "download.json",
         "download_status.json",
         "downloads.json",
@@ -61,6 +63,11 @@ def _validator_for(name: str) -> jsonschema.Validator:
         # one of those unions can't ship.
         "cloud_status.json",
         "knowledge.json",
+        # The progress object is the deploy service's own and may grow fields,
+        # so the event stays open where the envelopes around it are closed.
+        "deploy_progress_event.json",
+        # Enums on verdict / status / identity and a oneOf for blocking rows.
+        "workflow_check.json",
     ],
 )
 def test_schemas_are_well_formed(schema_name):
@@ -114,10 +121,16 @@ def test_env_json_validates():
     assert envelope["ok"] is True
 
 
-def test_which_json_validates():
-    envelope = _run_cli(["--json", "which"])
+def test_which_json_validates(tmp_path):
+    workspace = tmp_path / "ComfyUI"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("")
+    envelope = _run_cli(["--json", "--workspace", str(workspace), "which"])
     _validator_for("envelope.json").validate(envelope)
+    assert envelope["ok"] is True
     _validator_for("which.json").validate(envelope["data"])
+    assert envelope["data"]["workspace_path"] == str(workspace)
+    assert envelope["data"]["exists"] is True
 
 
 def test_help_json_validates():

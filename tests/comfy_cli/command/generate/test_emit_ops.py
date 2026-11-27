@@ -1,12 +1,12 @@
 """``generate --emit-ops``: the emitter expressed as the frozen op vocabulary.
 
 Why: ``--emit-workflow`` writes an API-format file, which the canvas and
-every edit tool refuse (``workflow_not_frontend_format`` — 48 refusals in one
-staging day), and which the CRDT write path cannot attribute (no ops). Instead
-of converting API→frontend after the fact — a second implementation of widget
-order and layout — the emitter mints the graph as add_node/set_widget/connect
-specs and lets ``workflow_ops.apply_specs`` materialize the frontend workflow,
-exactly the machinery every hand edit already uses. One answer, not two.
+every edit tool refuse (``workflow_not_frontend_format``), and which the CRDT
+write path cannot attribute (no ops). Instead of converting API→frontend after
+the fact — a second implementation of widget order and layout — the emitter
+mints the graph as add_node/set_widget/connect specs and lets
+``workflow_ops.apply_specs`` materialize the frontend workflow, exactly the
+machinery every hand edit already uses. One answer, not two.
 
 The round-trip test is the contract: lowering the materialized frontend
 workflow back to API format must reproduce the semantics of the API graph
@@ -31,7 +31,7 @@ PARTNER_OBJECT_INFO = json.loads(
 
 # Core nodes build_workflow relies on that are not partner nodes. Minimal but
 # faithful shapes: LoadImage's image is an upload-backed combo (so a local
-# filename passes the enum gate), ImageBatch is the 2-input folder.
+# filename passes the enum gate), BatchImagesNode is the autogrow folder.
 CORE_OBJECT_INFO = {
     "LoadImage": {
         "input": {"required": {"image": [["example.png"], {"image_upload": True}]}},
@@ -42,18 +42,19 @@ CORE_OBJECT_INFO = {
         "display_name": "Load Image",
         "category": "image",
     },
-    "SaveImage": {
+    "SaveImageAdvanced": {
         "input": {
             "required": {
                 "images": ["IMAGE"],
                 "filename_prefix": ["STRING", {"default": "ComfyUI"}],
+                "format": [["png", "exr", "avif"], {"default": "png"}],
             }
         },
-        "input_order": {"required": ["images", "filename_prefix"]},
-        "output": [],
-        "output_name": [],
-        "name": "SaveImage",
-        "display_name": "Save Image",
+        "input_order": {"required": ["images", "filename_prefix", "format"]},
+        "output": ["IMAGE"],
+        "output_name": ["images"],
+        "name": "SaveImageAdvanced",
+        "display_name": "Save Image (Advanced)",
         "category": "image",
     },
     "SaveVideo": {
@@ -72,17 +73,44 @@ CORE_OBJECT_INFO = {
         "display_name": "Save Video",
         "category": "image/video",
     },
+    "BatchImagesNode": {
+        # Live shape from cloud's object_info: one COMFY_AUTOGROW_V3 group.
+        "input": {
+            "required": {
+                "images": [
+                    "COMFY_AUTOGROW_V3",
+                    {
+                        "template": {
+                            "input": {"required": {"image": ["IMAGE", {}]}},
+                            "prefix": "image",
+                            "min": 1,
+                            "max": 50,
+                        }
+                    },
+                ]
+            }
+        },
+        "input_order": {"required": ["images"]},
+        "output": ["IMAGE"],
+        "output_name": ["IMAGE"],
+        "name": "BatchImagesNode",
+        "display_name": "Batch Images",
+        "category": "image/batch",
+    },
+}
+
+# Classes the emitter must NOT mint. Kept in the graph so a regression is
+# refused by the deprecation gate instead of passing on a catalog that lacks
+# the class. ComfyUI has flagged ImageBatch DEPRECATED since v0.35.0.
+RETIRED_OBJECT_INFO = {
     "ImageBatch": {
         "input": {"required": {"image1": ["IMAGE"], "image2": ["IMAGE"]}},
         "input_order": {"required": ["image1", "image2"]},
         "output": ["IMAGE"],
         "output_name": ["IMAGE"],
         "name": "ImageBatch",
-        "display_name": "Batch Images",
+        "display_name": "Batch Images (DEPRECATED)",
         "category": "image",
-        # ComfyUI has flagged this DEPRECATED since v0.35.0, the version cloud
-        # runs. The multi-image chain still mints it, so the fixture has to say
-        # so or the deprecation gate is never exercised on that path.
         "deprecated": True,
     },
 }
@@ -90,6 +118,7 @@ CORE_OBJECT_INFO = {
 
 def _object_info() -> dict:
     merged = dict(CORE_OBJECT_INFO)
+    merged.update(RETIRED_OBJECT_INFO)
     merged.update(PARTNER_OBJECT_INFO)
     return merged
 
@@ -140,7 +169,11 @@ def test_ops_shape_for_an_image_edit_model():
         "adds, then widgets, then connects — every endpoint exists before it is referenced"
     )
     adds = [s for s in specs if s["op"] == "add_node"]
-    assert {s["class_type"] for s in adds} == {"LoadImage", "GeminiImageNode", "SaveImage"}
+    assert {s["class_type"] for s in adds} == {
+        "LoadImage",
+        "GeminiImageNode",
+        "SaveImageAdvanced",
+    }
     assert all(s.get("as") for s in adds), "every add declares an alias for later specs to reference"
     prompts = [s for s in specs if s["op"] == "set_widget" and s["widget"] == "prompt"]
     assert len(prompts) == 1 and prompts[0]["value"] == "add sunglasses"
@@ -160,11 +193,11 @@ def test_allow_deprecated_is_read_from_the_spec_not_stamped_on_everything():
 
     flux = adds("flux-2", {"prompt": "a fox"})
     assert flux["Flux2ImageNode"] is False, "a live partner class carries no exemption"
-    assert flux["SaveImage"] is False, "a live core class carries no exemption"
+    assert flux["SaveImageAdvanced"] is False, "a live core class carries no exemption"
 
     gemini = adds("nano-banana", {"prompt": "p", "image": ["a.png", "b.png"]})
     assert gemini["GeminiImageNode"] is False, "a partner class that is not deprecated gets no exemption"
-    assert gemini["ImageBatch"] is True, "core scaffolding the emitter mints itself keeps its exemption"
+    assert gemini["BatchImagesNode"] is False, "core scaffolding the emitter mints itself is live, so no exemption"
 
     # The exemption is read off the entry being emitted, not off a union over
     # the whole table. No entry declares `deprecated_ok` today, so a deprecated
@@ -175,24 +208,18 @@ def test_allow_deprecated_is_read_from_the_spec_not_stamped_on_everything():
     assert [s["allow_deprecated"] for s in borrowed if s["op"] == "add_node"] == [False]
 
 
-def test_core_exemption_must_match_the_catalog_in_both_directions():
-    """The sibling of `test_deprecated_mapped_node_must_declare_its_exemption`,
-    for the classes `build_workflow` mints itself. Without it the core exemption
-    is write-only: once `BatchImagesNode` takes over and `ImageBatch` stops being
-    deprecated, a stale entry in `_CORE_DEPRECATED_OK` would survive its own
-    migration in silence — the same failure that put a deprecated class in front
-    of users in the first place."""
+def test_core_scaffolding_the_emitter_mints_is_never_deprecated():
+    """The core classes ``build_workflow`` mints itself carry no exemption, so
+    each one has to be live. This replaced the core exemption set, whose only
+    entry was ImageBatch: once the chain moved to BatchImagesNode the set was
+    empty, and an empty exemption is just a place to hide the next one."""
     graph = _graph()
     for class_type in CORE_OBJECT_INFO:
         meta = graph.node(class_type)
         assert meta is not None, f"{class_type} missing from CORE_OBJECT_INFO — the fixture and the graph disagree"
-        assert (class_type in emit._CORE_DEPRECATED_OK) is bool(meta.deprecated), (
-            f"{class_type}: deprecated={bool(meta.deprecated)} but "
-            f"{'listed in' if class_type in emit._CORE_DEPRECATED_OK else 'missing from'} _CORE_DEPRECATED_OK. "
-            f"Exempt a class only while it is deprecated, and drop it the moment it is not."
-        )
-    unknown = set(emit._CORE_DEPRECATED_OK) - set(CORE_OBJECT_INFO)
-    assert not unknown, f"_CORE_DEPRECATED_OK names classes the fixture does not record: {sorted(unknown)}"
+        assert not meta.deprecated, f"{class_type} is deprecated; the emitter must not mint it"
+    for class_type in RETIRED_OBJECT_INFO:
+        assert graph.node(class_type).deprecated, f"{class_type} is in RETIRED_OBJECT_INFO but not deprecated"
 
 
 def test_an_unexempt_deprecated_class_refuses_with_its_own_code_not_the_umbrella(tmp_path):
@@ -274,7 +301,7 @@ def test_ops_roundtrip_with_no_image_params():
     assert got["Flux2ImageNode"]["model"] == "Flux.2 [pro]"
     assert got["Flux2ImageNode"]["model.width"] == 512
     assert got["Flux2ImageNode"]["model.height"] == 768
-    assert got["SaveImage"]["images"] == ("link", "Flux2ImageNode")
+    assert got["SaveImageAdvanced"]["images"] == ("link", "Flux2ImageNode")
 
 
 def test_ops_set_a_combo_selector_before_its_sub_widgets_whatever_the_dict_order():
@@ -285,13 +312,43 @@ def test_ops_set_a_combo_selector_before_its_sub_widgets_whatever_the_dict_order
     assert widgets == ["model", "model.width"]
 
 
-def test_ops_fold_multiple_images_through_image_batch():
-    api = emit.build_workflow("nano-banana", {"prompt": "merge", "image": ["a.png", "b.png"]})
-    wf = _apply(emit.ops_from_api_workflow(api, _graph(), "nano-banana"))
+@pytest.mark.parametrize("paths", [["a.png", "b.png"], ["a.png", "b.png", "c.png"]])
+def test_multi_image_emit_ops_batch_through_batch_images_node_never_image_batch(paths):
+    """Several reference images fold through ONE live ``BatchImagesNode``, one
+    autogrow slot per image in order, and never through the deprecated
+    ``ImageBatch`` chain. Cloud's ComfyUI flags ``ImageBatch`` DEPRECATED, so
+    every multi-image ``generate --emit-ops`` graph used to carry a badged node.
+    The fixture still records ``ImageBatch`` as deprecated, so a regression to
+    the chain is refused by the gate rather than slipping through."""
+    api = emit.build_workflow("nano-banana", {"prompt": "merge", "image": paths})
+    specs = emit.ops_from_api_workflow(api, _graph(), "nano-banana")
+    adds = [s for s in specs if s["op"] == "add_node"]
+    classes = [s["class_type"] for s in adds]
+    assert "ImageBatch" not in classes
+    assert classes.count("BatchImagesNode") == 1
+    assert classes.count("LoadImage") == len(paths)
+    assert not any(s["allow_deprecated"] for s in adds), "nothing the emitter mints needs a deprecation exemption"
+
+    wf = _apply(specs)
+    assert not any(n["type"] == "ImageBatch" for n in wf["nodes"])
     lowered = convert_ui_to_api(wf, _object_info())
-    got = _api_by_class(lowered)
-    assert got["GeminiImageNode"]["images"] == ("link", "ImageBatch")
-    assert got["ImageBatch"]["image1"] == ("link", "LoadImage")
+    by_id = {nid: n for nid, n in lowered.items()}
+    ((batch_id, batch),) = [(i, n) for i, n in by_id.items() if n["class_type"] == "BatchImagesNode"]
+    slots = {k: v for k, v in batch["inputs"].items() if k.startswith("images.")}
+    assert sorted(slots) == [f"images.image{i}" for i in range(len(paths))]
+    titles = [by_id[str(slots[f"images.image{i}"][0])]["inputs"]["image"] for i in range(len(paths))]
+    assert [Path(t).name for t in titles] == paths, "slot order follows --image order"
+    (partner,) = [n for n in by_id.values() if n["class_type"] == "GeminiImageNode"]
+    assert str(partner["inputs"]["images"][0]) == str(batch_id)
+
+
+def test_a_single_image_wires_straight_in_with_no_batch_node():
+    api = emit.build_workflow("nano-banana", {"prompt": "edit", "image": ["a.png"]})
+    got = _api_by_class(
+        convert_ui_to_api(_apply(emit.ops_from_api_workflow(api, _graph(), "nano-banana")), _object_info())
+    )
+    assert got["GeminiImageNode"]["images"] == ("link", "LoadImage")
+    assert "BatchImagesNode" not in got and "ImageBatch" not in got
 
 
 # ─── write path: frontend file + replace_ops envelope batch ───────────────
@@ -299,7 +356,7 @@ def test_ops_fold_multiple_images_through_image_batch():
 
 def test_write_frontend_workflow_writes_frontend_and_returns_replace_batch(tmp_path):
     out = tmp_path / "workflow.json"
-    wf, ops = emit.write_frontend_workflow(
+    wf, ops, _skipped = emit.write_frontend_workflow(
         "nano-banana",
         {"prompt": "add sunglasses", "image": "cat.png"},
         out,
@@ -317,14 +374,52 @@ def test_write_frontend_workflow_writes_frontend_and_returns_replace_batch(tmp_p
 
 def test_write_frontend_workflow_emits_delete_half_over_a_previous_graph(tmp_path):
     out = tmp_path / "workflow.json"
-    _wf1, _ops1 = emit.write_frontend_workflow(
+    _wf1, _ops1, _s1 = emit.write_frontend_workflow(
         "flux-2", {"prompt": "first"}, out, _graph(), actor="agent", base_version=0
     )
-    _wf2, ops2 = emit.write_frontend_workflow(
+    _wf2, ops2, _s2 = emit.write_frontend_workflow(
         "nano-banana", {"prompt": "second", "image": "cat.png"}, out, _graph(), actor="agent", base_version=1
     )
     deletes = [o for o in ops2 if o["op"] == "delete_node"]
     assert deletes, "replacing an existing canvas must delete what it replaces, like templates fetch"
+
+
+def test_a_large_existing_file_skips_the_batch_instead_of_discarding_the_workflow(tmp_path):
+    """``replace_ops`` emits a ``delete_node`` per node ALREADY at the target
+    path, so a target holding a big workflow pushes the batch past the 1,024-op
+    bound even though the graph being written is tiny.
+
+    That is ordinary user data at a path the user named, not a bug in the built
+    graph. Raising turned it into an ``EmitError`` before the write, so nothing
+    was saved at all and the umbrella hint told the caller to check the model
+    name and its required inputs — for a failure neither of them caused.
+    ``templates fetch --emit-ops`` already degrades on the same condition, and
+    this now matches it: the file is written, ``ops`` is ``None``, and
+    ``ops_skipped`` says why. Red on the parent with ``EmitError``.
+    """
+    out = tmp_path / "workflow.json"
+    out.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": i + 1, "type": "LoadImage", "widgets_values": ["example.png"], "inputs": [], "outputs": []}
+                    for i in range(workflow_ops._MAX_OPS_PER_BATCH + 1)
+                ],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    wf, ops, ops_skipped = emit.write_frontend_workflow(
+        "flux-2", {"prompt": "first"}, out, _graph(), actor="agent", base_version=0
+    )
+
+    assert ops is None
+    assert "1024-op batch limit" in ops_skipped
+    # The workflow itself is good and is on disk, which is the deliverable.
+    assert json.loads(out.read_text()) == wf
+    assert isinstance(wf.get("nodes"), list) and wf["nodes"]
 
 
 def test_write_frontend_workflow_unsupported_model_still_raises(tmp_path):
@@ -429,6 +524,149 @@ def test_cli_emit_ops_writes_frontend_and_envelope_ops(tmp_path, monkeypatch, ru
     assert isinstance(on_disk.get("nodes"), list), "the written file is canvas-editable frontend format"
 
 
+def test_cli_emit_ops_says_so_in_pretty_mode_when_no_batch_was_minted(tmp_path, monkeypatch):
+    """A skipped batch has to be visible to a human, not only to `--json`.
+
+    `ops_skipped` travels in the envelope, and `Renderer.emit` prints nothing in
+    pretty mode — so a pretty-mode run that asked for `--emit-ops` and got no
+    batch printed exactly what a successful one prints ("Wrote workflow"), with
+    no way to tell the two apart. The condition here is the ordinary one: the
+    target path already holds a workflow large enough that the `delete_node` per
+    existing node pushes the batch past the 1,024-op bound.
+    """
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    oi_path = tmp_path / "object_info.json"
+    oi_path.write_text(json.dumps(_object_info()), encoding="utf-8")
+    monkeypatch.setenv("COMFY_OBJECT_INFO_FILE", str(oi_path))
+    out = tmp_path / "workflow.json"
+    out.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": i + 1, "type": "LoadImage", "widgets_values": ["example.png"], "inputs": [], "outputs": []}
+                    for i in range(workflow_ops._MAX_OPS_PER_BATCH + 1)
+                ],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # `COMFY_OUTPUT` rather than a TTY probe: under CliRunner stdout is not a
+    # TTY, so mode resolution (`Renderer.resolve` rule 6) picks JSON and the
+    # pretty branch under test is never reached. `NO_COLOR`/`COLUMNS` keep Rich
+    # from wrapping or styling the warning mid-assertion.
+    result = CliRunner().invoke(
+        app,
+        [
+            "generate",
+            "nano-banana",
+            "--prompt",
+            "add sunglasses",
+            "--image",
+            "cat.png",
+            "--emit-workflow",
+            str(out),
+            "--emit-ops",
+        ],
+        env={"COMFY_OUTPUT": "pretty", "NO_COLOR": "1", "COLUMNS": "400"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Wrote workflow" in result.output
+    assert "--emit-ops" in result.output and "no batch was minted" in result.output
+    assert "1024-op batch limit" in result.output
+    # The file is still the deliverable and is still the newly built graph.
+    on_disk = json.loads(out.read_text())
+    assert len(on_disk["nodes"]) <= workflow_ops._MAX_OPS_PER_BATCH
+
+
+@pytest.mark.parametrize("flag", ["--json", "--json-stream"])
+def test_cli_emit_ops_reports_the_skip_in_the_machine_envelope(tmp_path, monkeypatch, flag):
+    """The machine-readable half of the same condition.
+
+    The pretty warning exists because `ops_skipped` reaches only the envelope,
+    so that key is the whole premise and is worth pinning directly: on a skip the
+    envelope carries `ops_skipped` with the refusal reason and carries no `ops`
+    key at all, which is what lets a consumer fall back to the whole-document
+    path instead of inferring it from an empty batch. Both machine modes, since
+    `--json-stream` resolves to NDJSON and emits the same final envelope.
+    """
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    oi_path = tmp_path / "object_info.json"
+    oi_path.write_text(json.dumps(_object_info()), encoding="utf-8")
+    monkeypatch.setenv("COMFY_OBJECT_INFO_FILE", str(oi_path))
+    out = tmp_path / "workflow.json"
+    out.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": i + 1, "type": "LoadImage", "widgets_values": ["example.png"], "inputs": [], "outputs": []}
+                    for i in range(workflow_ops._MAX_OPS_PER_BATCH + 1)
+                ],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            flag,
+            "generate",
+            "nano-banana",
+            "--prompt",
+            "add sunglasses",
+            "--image",
+            "cat.png",
+            "--emit-workflow",
+            str(out),
+            "--emit-ops",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    assert envelope["ok"] is True
+    data = envelope["data"]
+    assert "1024-op batch limit" in data["ops_skipped"]
+    # Absent, not null or empty: `templates fetch --emit-ops` uses the same
+    # envelope shape, and a consumer branches on the key being there.
+    assert "ops" not in data, sorted(data)
+    assert data["format"] == "frontend"
+    # The file is still written, which is the deliverable either way.
+    assert json.loads(out.read_text())["nodes"]
+
+
+def test_cli_emit_ops_is_quiet_in_pretty_mode_when_the_batch_was_minted(tmp_path, monkeypatch):
+    """The complement: the warning is conditional, not printed on every run."""
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    oi_path = tmp_path / "object_info.json"
+    oi_path.write_text(json.dumps(_object_info()), encoding="utf-8")
+    monkeypatch.setenv("COMFY_OBJECT_INFO_FILE", str(oi_path))
+    out = tmp_path / "workflow.json"
+
+    result = CliRunner().invoke(
+        app,
+        ["generate", "nano-banana", "--prompt", "x", "--image", "cat.png", "--emit-workflow", str(out), "--emit-ops"],
+        env={"COMFY_OUTPUT": "pretty", "NO_COLOR": "1", "COLUMNS": "400"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Wrote workflow" in result.output
+    assert "no batch was minted" not in result.output
+
+
 def test_cli_emit_ops_without_emit_workflow_is_an_error(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 
@@ -449,7 +687,7 @@ def test_write_frontend_workflow_strips_apply_bookkeeping_before_write_and_batch
     next edit. Strip BEFORE ``replace_ops`` so the returned workflow, the
     file and the batch all describe the same document."""
     out = tmp_path / "workflow.json"
-    wf, ops = emit.write_frontend_workflow(
+    wf, ops, _skipped = emit.write_frontend_workflow(
         "nano-banana", {"prompt": "ORIGINAL", "image": "cat.png"}, out, _graph(), actor="agent", base_version=7
     )
     on_disk = json.loads(out.read_text())
@@ -489,3 +727,25 @@ def test_emitted_workflow_accepts_a_later_edit_stamped_below_its_base_version(tm
     assert edited.exit_code == 0, edited.output
     lowered = convert_ui_to_api(json.loads(out.read_text()), _object_info())
     assert _api_by_class(lowered)["GeminiImageNode"]["prompt"] == "EDITED", "the edit was discarded by a stale stamp"
+
+
+def test_write_frontend_workflow_materializes_nano_banana_pro_from_the_nightly_input(tmp_path):
+    """Pin for an agent failure: a generate call with these args got
+    `emit_workflow_failed` — "'gemini-3-pro-image-preview' not in 1 known
+    options for model — closest: gemini-2.5-flash-image" — because emit built
+    GeminiImageNode. #921 routes that model to GeminiImage2Node; this replays
+    that input through the same frontend (canvas-ops) path."""
+    wf, ops, _skipped = emit.write_frontend_workflow(
+        "nano-banana",
+        {
+            "prompt": "Redraw this character as 16-bit pixel art.",
+            "image": "abababababababababababababababababababababababababababababababab.gif",
+            "model": "gemini-3-pro-image-preview",
+        },
+        tmp_path / "workflow.json",
+        _graph(),
+        actor="agent",
+    )
+    assert ops
+    partner = next(n for n in wf["nodes"] if n["type"] == "GeminiImage2Node")
+    assert "gemini-3-pro-image-preview" in partner["widgets_values"]

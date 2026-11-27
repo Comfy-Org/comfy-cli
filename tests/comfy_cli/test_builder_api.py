@@ -46,7 +46,7 @@ class _Recorder:
     """Stands in for the shared ``request_json`` seam, recording each request.
 
     Answers with one superset envelope so every method's own response parsing
-    still runs (``create_build`` reads ``id``, ``create_release`` reads
+    still runs (``create_build_response`` returns the build, ``create_release`` reads
     ``releaseId``/``statusUrl``, the list reads take their own key).
 
     ``releaseId``/``releases`` are the post-#770 spellings and ``buildVersionId``/
@@ -111,7 +111,7 @@ class Wire:
 # produced it, and is asserted GONE so this table cannot pass un-renamed code.
 _WIRE = [
     Wire(
-        new_name="create_build",
+        new_name="create_build_response",
         legacy_name="create_distribution",
         args=("n", {"models": [], "customNodes": []}),
         http_method="POST",
@@ -119,7 +119,7 @@ _WIRE = [
         body={"name": "n", "definition": {"models": [], "customNodes": []}},
     ),
     Wire(
-        new_name="create_build",
+        new_name="create_build_response",
         legacy_name="create_distribution",
         args=("n", {"models": []}, "a description"),
         http_method="POST",
@@ -462,6 +462,24 @@ def test_create_release_falls_back_to_buildversionid(monkeypatch):
     client = BuilderClient(_BASE_URL, "jwt-token")
 
     assert client.create_release("d1", [{"os": "linux", "gpu": "nvidia"}]) == ("v1", "https://s")
+
+
+@pytest.mark.parametrize(("build_id", "segment"), [("a b", "a%20b"), ("a?b", "a%3Fb"), ("x/y", "x%2Fy")])
+def test_list_releases_sends_the_build_id_as_one_path_segment(monkeypatch, build_id, segment):
+    # Given a Build id a person typed, which the Build list did not name
+    seen: list[str] = []
+
+    def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
+        seen.append(url)
+        return 200, {"releases": []}
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", fake_request_json)
+
+    # When
+    BuilderClient(_BASE_URL, "jwt-token").list_releases(build_id)
+
+    # Then
+    assert seen == [f"{_BASE}/v1/builds/{segment}/releases?limit=100"]
 
 
 def test_list_releases_falls_back_to_the_versions_key(monkeypatch):

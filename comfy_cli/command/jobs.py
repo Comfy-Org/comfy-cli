@@ -11,7 +11,7 @@ submitted the prompt (``send_sync(..., server.client_id)`` in ComfyUI's
 ``execution.py``, delivered by ``PromptServer.send_json`` only to that one
 ``sid``). A watcher that connects with a *fresh* ``clientId`` therefore receives
 nothing at all — so ``jobs watch`` re-attaches with the submitting client_id
-(see ``_resolve_watch_client_id``).
+(see ``_select_watch_client_id``).
 
 Three subcommands:
 
@@ -27,6 +27,7 @@ Three subcommands:
 
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
@@ -35,7 +36,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple
 
 import typer
 from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
@@ -59,21 +60,18 @@ app = typer.Typer(no_args_is_help=True, help="List, inspect, and live-watch Comf
 def _is_pid_alive(pid: int) -> bool:
     """Check if a process with the given PID is still running.
 
-    Uses ``psutil.Process.is_running`` — never ``os.kill(pid, 0)``, which on Windows
+    Uses ``psutil.pid_exists`` — never ``os.kill(pid, 0)``, which on Windows
     routes through ``GenerateConsoleCtrlEvent`` (0 == CTRL_C_EVENT) and, on
     Python <= 3.13.1, can fall through to ``TerminateProcess`` and kill the
-    probed process (python/cpython gh-58689). ``pid_exists`` alone is not
-    sufficient on Windows because an exited process remains addressable while
-    another process still holds an open handle to it.
+    probed process (python/cpython gh-58689).
     """
     if pid <= 0:
         return False
     import psutil
 
     try:
-        process = psutil.Process(pid)
-        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
-    except (psutil.Error, OverflowError, ValueError, OSError):
+        return psutil.pid_exists(pid)
+    except (OverflowError, ValueError, OSError):
         # `watcher_pid` comes off a deliberately tolerant JSON load with no
         # range check, so a corrupt or hand-edited state file can carry a pid
         # psutil can't even look up (out-of-range -> OverflowError; Windows
@@ -159,12 +157,21 @@ def _http_get_json(url: str, *, timeout: float = 10.0) -> Any:
     ``/history`` can't OOM the CLI. Every failure — unreachable, oversize,
     non-JSON — leaves as a ``RuntimeError``, which is the single family every
     call site below already catches.
+
+    That promise is why the net is ``OSError`` rather than ``URLError`` (a
+    subclass of it). urllib only wraps what the *request* raises; a server that
+    accepts the connection and hangs up before answering surfaces as a raw
+    ``http.client.RemoteDisconnected`` out of ``getresponse()``, which is an
+    ordinary transient — a restarting ComfyUI, a reset connection — and has no
+    business reaching a caller as an uncaught traceback. ``HTTPException``
+    covers its siblings that are not ``OSError`` at all (``IncompleteRead``,
+    ``BadStatusLine``).
     """
     req = urllib.request.Request(url)
     try:
         with plain_urlopen(req, timeout=timeout) as resp:
             return json.loads(read_capped(resp, url))
-    except urllib.error.URLError as e:
+    except (OSError, http.client.HTTPException) as e:
         raise RuntimeError(f"failed to GET {url}: {e}") from e
     except ResponseTooLarge as e:
         raise RuntimeError(str(e)) from e
@@ -218,6 +225,15 @@ def _emit_terminal(renderer, payload: dict, *, command: str, where: str | None =
     if isinstance(structured, dict):
         structured = execution_errors.trim_record(structured)
         payload["execution_error"] = structured
+    # A live watch also copies the raw event to `details`, and some callers
+    # carry the record as `error`. Both reach the envelope; redact them here,
+    # whatever the status, because the traceback rewrite below only replaces
+    # `details` when the event has a traceback.
+    if isinstance(payload.get("details"), dict):
+        payload["details"] = execution_errors.redact_record(payload["details"])
+    if isinstance(err, dict):
+        err = execution_errors.redact_record(err)
+        payload["error"] = err
     if status == "error":
         # Classify the structured record itself when the cloud snapshot
         # carries one: re-parsing the flattened one-liner would JSON-sniff an
@@ -540,6 +556,30 @@ def _merge_jobs(state_rows: list[JobRow], server_rows: list[JobRow]) -> list[Job
     return sorted(by_id.values(), key=sort_key, reverse=False)
 
 
+# The five keys the LOCAL listing counts, and the only ones it counts.
+_LOCAL_LISTING_MEDIA_KEYS = ("images", "gifs", "videos", "audio", "files")
+
+
+def _media_item_count(outputs: Any) -> int:
+    """The local `jobs ls` output count for a `/history` record's outputs map.
+
+    `len()` of the five media keys, nulls included, every other key ignored.
+    Shared with `_nothing_to_show_note` rather than inlined at the one call
+    site, so the note that reconciles this number and the row that reports it
+    cannot drift onto two different rules.
+    """
+    if not isinstance(outputs, dict):
+        return 0
+    return sum(
+        len(items)
+        for v in outputs.values()
+        if isinstance(v, dict)
+        for key in _LOCAL_LISTING_MEDIA_KEYS
+        for items in [v.get(key) or []]
+        if isinstance(items, list)
+    )
+
+
 def _gather_jobs(host: str, port: int, *, limit: int) -> list[JobRow]:
     """Pull running + pending + recent history; merge into a single ordered list."""
     rows: list[JobRow] = []
@@ -596,15 +636,7 @@ def _gather_jobs(host: str, port: int, *, limit: int) -> list[JobRow]:
             if isinstance(msg, list) and msg and msg[0] == "execution_error":
                 status_str = "error"
                 break
-        outputs = body.get("outputs") or {}
-        output_count = sum(
-            len(items)
-            for v in outputs.values()
-            if isinstance(v, dict)
-            for key in ("images", "gifs", "videos", "audio", "files")
-            for items in [v.get(key) or []]
-            if isinstance(items, list)
-        )
+        output_count = _media_item_count(body.get("outputs") or {})
         wf = body.get("prompt") or [None, None, None, None]
         wf_dict = wf[2] if isinstance(wf, list) and len(wf) > 2 else None
         rows.append(
@@ -928,6 +960,282 @@ def _render_jobs_pretty(rows: list[JobRow], *, host: str, port: int) -> None:
 # ---------------------------------------------------------------------------
 
 
+# What a completed run with an empty outputs map means. `jobs status` and
+# `jobs wait` used to report it as a bare `status: completed` with no outputs
+# and say nothing else, while `comfy download` explains the case — so the tools
+# an agent calls on one job disagreed, and the cloud agent read the silence as
+# a dead generation service and re-ran the graph. `wait_cmd` carries this on
+# its row too, so a wait answers the question instead of deferring it.
+#
+# Every clause is deliberately only as strong as the record supports, since a
+# note written to stop the agent overstating an outcome must not overstate one
+# itself:
+#
+# * "reported no outputs", not "saved nothing" — a node can write a file and
+#   report nothing (ComfyUI's own `CheckpointSave` has `RETURN_TYPES = ()` and
+#   returns no UI output).
+# * a cache hit is named as *possible*, not as the cause. An empty outputs map
+#   does not establish one, and the presence of a save node does not either —
+#   `CheckpointSave` is a counterexample to both.
+# * the save/preview check comes before the seed advice, as the `download`
+#   hint does. Telling a graph with no save node to change its seed walks
+#   straight back into the re-run loop this note exists to stop.
+_EMPTY_COMPLETION_NOTE = (
+    "completed and reported no outputs. Waiting will not produce files. Check that the workflow has "
+    "a save or preview node. A cache hit is also possible, so change an input or the seed if you need "
+    "to force fresh execution. Some nodes write files without reporting them. This is not a service "
+    "outage."
+)
+
+
+# The OTHER way a completion arrives with nothing to show, and the one that
+# was still silent: the record DID report output entries, and not one of them
+# resolves to a file this tool can fetch or to text it can read.
+#
+# It is also the half of "the listing and the status must agree on the output
+# count" that is fixable in this tool, and the reason they can disagree.
+# `jobs ls` counts raw record items — cloud's `/api/jobs` `outputs_count` takes
+# every non-null item under every node-output key bar `animated`/`result`, and
+# the local listing takes `len()` of the five media keys, nulls included — while
+# `jobs status` reports what the extractors can turn into a `/view` URL or a
+# text string: dicts carrying a `filename`, and a `text` list of `str`. The
+# vocabularies are not the same, so one job legitimately reads as `outputs: 1`
+# in the listing and `outputs: []` in the status, with nothing said about why.
+# That contradiction is what the reported session read as a dead generation
+# service.
+#
+# Same discipline as the note above: it states what the record carries and
+# names a possible cause as possible.
+#
+# * "cannot resolve", not "produced nothing" — the entry IS a report, in a
+#   shape this tool does not consume (a tagger's `{"tags": [...]}`, a
+#   bare-string `text`, a dict with no `filename`).
+# * a null item gets its own note, because it is the one case where something
+#   went wrong rather than merely being unreadable here: a hosted deployment
+#   writes `null` into the array for an output it recorded and could not
+#   upload. That note does NOT end in "this is not a service outage" — a run
+#   whose own output never stored is a failure of that run, just not a general
+#   outage — and does not claim re-reading cannot help, since this payload
+#   cannot prove the record had settled.
+# * it reconciles the listing's count explicitly, with THAT listing's own rule
+#   and its actual number, because an agent that sees 1 there and 0 here will
+#   otherwise go looking for a lost file.
+_UNRESOLVED_OUTPUTS_NOTE = (
+    "completed, and reported {entries} that this tool cannot resolve to a file or to text{keys}. "
+    "There is nothing to download, and waiting will not change that.{listed} This is not a service outage."
+)
+_DROPPED_OUTPUTS_NOTE = (
+    "completed, and reported {entries} that this tool cannot resolve to a file or to text{keys}. "
+    "{subject} no file reference at all (a null entry){cause}. Nothing in this record can be "
+    "downloaded.{listed} Re-read the job once in case its record had not settled; past that, an output "
+    "was recorded and no file came with it, which is a failure of this run rather than a service outage."
+)
+_DROPPED_CAUSE_CLOUD = ", which is what a hosted output whose upload did not land leaves behind"
+_UNRESOLVED_LISTED_CLAUSE = (
+    " `jobs ls` reports {count} for this run, counting entries this payload cannot resolve, so that "
+    "count is not a file this tool failed to fetch."
+)
+
+# Keys are server-supplied. Bounded and sanitized before they enter the note:
+# the note is prose a consumer may print raw, and `rich.Text` forwards `\x1b`
+# (the same reason the text preview sanitizes).
+_MAX_NOTE_KEYS = 4
+_MAX_NOTE_KEY_CHARS = 24
+
+
+def _listing_output_count(record_outputs: dict, where: str) -> int:
+    """What `jobs ls` would report for this record, by THAT listing's own rule.
+
+    The two listings do not count alike, so a note that reconciles one number
+    has to know which one it is reconciling:
+
+    * cloud — `/api/jobs` `outputs_count`, written by the server from
+      `common.CountOutputs`: every NON-NULL item under every node-output key
+      except `animated`/`result`.
+    * local — `_local_jobs_rows`' own sum: `len()` of the five media keys,
+      NULLS INCLUDED, and no other key counted.
+
+    Stating the wrong one is worse than saying nothing: locally a
+    `{"tags": [...]}` run would be told the listing counts entries it shows as
+    0, and a `{"images": [None]}` run shows 1 there while the cloud rule says 0.
+    """
+    if where == "local":
+        return _media_item_count(record_outputs)
+    count = 0
+    for node_output in record_outputs.values():
+        if not isinstance(node_output, dict):
+            continue
+        for key, items in node_output.items():
+            if key in ("animated", "result") or not isinstance(items, list):
+                continue
+            count += sum(1 for item in items if item is not None)
+    return count
+
+
+def _nothing_to_show_note(status: Any, record_outputs: Any, *, where: str = "cloud") -> str | None:
+    """What a completed run with nothing to show means, or ``None``.
+
+    Three notes, because there are three observations and they are not the same
+    claim:
+
+    * the record reported no output items at all — ``_EMPTY_COMPLETION_NOTE``;
+    * it reported items none of which this tool can resolve —
+      ``_UNRESOLVED_OUTPUTS_NOTE``;
+    * at least one of those items is ``null``, i.e. an output the producer
+      recorded with no file reference — ``_DROPPED_OUTPUTS_NOTE``, which is the
+      only one of the three where something went wrong rather than merely being
+      unreadable here, and is correspondingly the only one that does not end
+      "this is not a service outage" flatly or claim another read cannot help.
+
+    ``where`` selects the listing whose count is reconciled, and is why it is a
+    parameter rather than a constant: this is called from the local snapshot as
+    well as the cloud one. See ``_listing_output_count``.
+
+    Decided on the RAW record outputs rather than on this module's extracted
+    `outputs` / `text_outputs` alone, for two reasons, both of which are ways
+    of not asserting more than the record establishes:
+
+    * The extractors recognize media entries and a ``text`` list of ``str``.
+      A node can report in neither shape — a custom UI key such as a tagger's
+      ``{"tags": [...]}``, a bare-string ``text``, non-``str`` text items — and
+      deciding the EMPTY note on what they recognized would tell a run that
+      *did* report something that it reported nothing. Such a run now gets the
+      unresolved note instead of silence, which says what was observed without
+      claiming the run reported nothing.
+    * A record that carries no ``outputs`` key at all establishes nothing. On
+      cloud, completion comes from ``/api/jobs/<id>`` while the record is
+      fetched separately, so a status-only record that has not caught up must
+      not produce "waiting will not produce files". Requiring the key is what
+      closes that; a source with no record at all (the state-file fallback,
+      which stores output URLs flat and no node text) passes ``None`` and
+      withholds both notes entirely.
+
+    Deliberately NOT also requiring the record's own status to confirm
+    completion: ``/api/jobs/<id>`` is the authority on terminal state on cloud
+    and the same body's status block already decided it on local, while the
+    record's ``status`` is ``omitempty`` — requiring it would silently disable
+    these notes on any deployment that omits the field.
+    """
+    if status != "completed" or not isinstance(record_outputs, dict):
+        return None
+    # Imported here, not at module scope, like every other use of the client in
+    # this module.
+    from comfy_cli.comfy_client import extract_output_entries, extract_text_outputs
+
+    # Anything the caller can actually be shown means there is nothing to
+    # explain: a file URL, or node text. Checked on the extracted views because
+    # that is exactly the question "is there something to show?".
+    record = {"outputs": record_outputs}
+    if extract_output_entries(record) or extract_text_outputs(record):
+        return None
+
+    # Two counts, because they answer two different questions and collapsing
+    # them is how a note starts asserting more than it saw:
+    #
+    # * `total` — everything the record reported that this tool cannot use. It
+    #   is what the note's "N output entries" states, so a payload in a shape
+    #   nothing here reads has to count: it IS a report. That includes a
+    #   bare-string `text`, a non-dict node entry, a legacy `result` path
+    #   string, and a present-but-falsy value like `{"text": ""}`.
+    # * `dropped` — null items, an output recorded with no file reference.
+    #
+    # The listing's own count is NOT derived from these; it is computed by that
+    # listing's rule in `_listing_output_count`, so the reconciliation sentence
+    # quotes the number the caller would actually see.
+    total = 0
+    dropped = 0
+    keys: list[str] = []
+    seen_keys: set[str] = set()
+    extra_keys = False
+
+    def note_key(key: Any) -> None:
+        # Sanitize and bound FIRST, then dedupe, then cap — in that order, so a
+        # key that sanitizes to nothing cannot occupy a slot or trigger the
+        # overflow marker, two keys that differ only in stripped bytes cannot
+        # render as `a, a`, and collection stays O(1) per item however many
+        # distinct keys a hostile or broken record carries.
+        nonlocal extra_keys
+        name = sanitize(str(key))[:_MAX_NOTE_KEY_CHARS]
+        if not name or name in seen_keys:
+            return
+        if len(keys) >= _MAX_NOTE_KEYS:
+            extra_keys = True
+            return
+        seen_keys.add(name)
+        keys.append(name)
+
+    for node_output in record_outputs.values():
+        if not isinstance(node_output, dict):
+            # A node entry that is not a map at all. Unusable, and still a
+            # report — there is no key to name for it. An empty container is
+            # not a report, the same way an empty array under a key is not.
+            if node_output is not None and node_output != [] and node_output != ():
+                total += 1
+            continue
+        for key, items in node_output.items():
+            # `animated` holds `(True,)` boolean flags, which neither listing
+            # counts and which are not outputs in any reading.
+            if key == "animated":
+                continue
+            if key == "result":
+                # Legacy PreviewUI3D: a dict with a `filename` here IS resolved
+                # by the extractor (so this function already returned), and
+                # what is left is bare path strings — a report, in a shape
+                # nothing here reads. `None` under this key means "no
+                # background supplied", not a dropped output, so it is skipped
+                # rather than counted as either. Neither listing counts
+                # `result` at all, which is why these never reach `dropped` or
+                # the reconciliation.
+                if isinstance(items, list):
+                    present = [item for item in items if item is not None]
+                    if present:
+                        total += len(present)
+                        note_key(key)
+                continue
+            if not isinstance(items, list):
+                # A non-list payload under an output key: `{"text": "a
+                # description"}` is the shape the text extractor misses.
+                # Tested for absence, not for truthiness — `{"text": ""}` is a
+                # node that reported, badly, and must not be called empty.
+                if items is not None:
+                    total += 1
+                    note_key(key)
+                continue
+            for item in items:
+                total += 1
+                if item is None:
+                    dropped += 1
+                note_key(key)
+
+    if total == 0:
+        # No node reported a single item — `{}`, `{"images": []}`, or flags
+        # only. That is the empty completion, whatever shape the map took.
+        return _EMPTY_COMPLETION_NOTE
+
+    entries = "1 output entry" if total == 1 else f"{total} output entries"
+    keys_clause = ""
+    if keys:
+        label = "key" if len(keys) == 1 else "keys"
+        more = ", …" if extra_keys else ""
+        keys_clause = f" ({label}: {', '.join(keys)}{more})"
+    listing = _listing_output_count(record_outputs, where)
+    listed_clause = _UNRESOLVED_LISTED_CLAUSE.format(count=listing) if listing else ""
+
+    if not dropped:
+        return _UNRESOLVED_OUTPUTS_NOTE.format(entries=entries, keys=keys_clause, listed=listed_clause)
+    if dropped == total:
+        subject = "It carries" if total == 1 else "All of them carry"
+    else:
+        subject = "1 of them carries" if dropped == 1 else f"{dropped} of them carry"
+    # The upload explanation is a hosted-deployment behaviour; naming it on a
+    # local record would be inventing a cause for a shape local ComfyUI does
+    # not produce.
+    cause = _DROPPED_CAUSE_CLOUD if where != "local" else ""
+    return _DROPPED_OUTPUTS_NOTE.format(
+        entries=entries, keys=keys_clause, subject=subject, cause=cause, listed=listed_clause
+    )
+
+
 def _state_file_snapshot(st: JobState, *, prompt_id: str, host: str, port: int, server_running: bool) -> dict:
     """Shape a `jobs status` payload out of the on-disk state file.
 
@@ -952,6 +1260,14 @@ def _state_file_snapshot(st: JobState, *, prompt_id: str, host: str, port: int, 
         # same thing the live queue-hit payload emits.
         "outputs_by_node": {},
         "outputs_by_item": {},
+        # Same reasoning, and the same reason it cannot be reconstructed: the
+        # state file records output URLs flat and no node text at all. Present
+        # but empty, so a consumer indexing it on any `jobs status` success
+        # payload stays safe. `source: "state_file"` is how a caller tells this
+        # apart from a record-backed `{}` — which is also why this path has no
+        # history record to pass to `_nothing_to_show_note` and so never
+        # carries either nothing-to-show note.
+        "text_outputs": {},
         "workflow_size": None,
         "error": st.error,
         "host": host,
@@ -1075,7 +1391,7 @@ def _server_confirms_no_record(host: str, port: int, prompt_id: str) -> bool:
     """
     try:
         q = _http_get_json(f"http://{host}:{port}/queue")
-        hist = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+        hist = _http_get_json(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
     except RuntimeError:
         return False
     if not isinstance(q, dict) or not isinstance(hist, dict):
@@ -1240,10 +1556,20 @@ def status_cmd(
     renderer.emit(snapshot, command="jobs status")
 
 
-def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
+def _snapshot(host: str, port: int, prompt_id: str, *, deadline: float | None = None) -> dict | None:
+    def get_json(url: str) -> Any:
+        if deadline is None:
+            return _http_get_json(url)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("snapshot deadline expired")
+        # urllib applies this timeout to the connected socket too, so the
+        # capped response-body read cannot outlive the same remaining budget.
+        return _http_get_json(url, timeout=remaining)
+
     # First: is it in the queue?
     try:
-        q = _http_get_json(f"http://{host}:{port}/queue")
+        q = get_json(f"http://{host}:{port}/queue")
     except RuntimeError:
         q = {}
     for state, key in (("running", "queue_running"), ("pending", "queue_pending")):
@@ -1264,7 +1590,7 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
 
     # Then: history.
     try:
-        h = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+        h = get_json(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
     except RuntimeError:
         return None
     if not isinstance(h, dict) or prompt_id not in h:
@@ -1297,30 +1623,78 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
     # file, written at submit time by `comfy run`.
     try:
         job = jobs_state.read(prompt_id)
-    except ValueError:  # unsafe prompt_id — no state file to join against
+    except (ValueError, OSError):  # unsafe id or unavailable state dir — no local record
         job = None
     item_map = job.item_map if job is not None else None
     outputs_by_node, outputs_by_item = _group_outputs(node_outputs, item_map)
+    # Text/STRING node outputs (image descriptions, ShowText, …) live under
+    # outputs[node]["text"] as bare strings, which the URL flatten drops.
+    # Additive key: full untruncated strings for `--json`; the pretty
+    # renderer previews them. Empty {} when the run emitted no text.
+    text_outputs = extract_text_outputs(body)
+    status = "error" if error_detail else "completed" if completed else "cancelled" if interrupted else "queued"
 
-    return {
+    snap: dict[str, Any] = {
         "prompt_id": prompt_id,
-        "status": ("error" if error_detail else "completed" if completed else "cancelled" if interrupted else "queued"),
+        "status": status,
         "workflow_size": None,
         "outputs": output_urls,
         "outputs_by_node": outputs_by_node,
         "outputs_by_item": outputs_by_item,
-        # Text/STRING node outputs (image descriptions, ShowText, …) live under
-        # outputs[node]["text"] as bare strings, which the URL flatten drops.
-        # Additive key: full untruncated strings for `--json`; the pretty
-        # renderer previews them. Empty {} when the run emitted no text.
-        "text_outputs": extract_text_outputs(body),
+        "text_outputs": text_outputs,
         "error": error_detail,
         "host": host,
         "port": port,
     }
+    if note := _nothing_to_show_note(status, body.get("outputs"), where="local"):
+        snap["note"] = note
+    return snap
 
 
 _TEXT_PREVIEW_LIMIT = 20
+
+
+def _text_preview_lines(text_outputs: Any) -> list:
+    """Bounded `text` rows for a status table, or `[]`.
+
+    First non-blank line, ~120 chars per entry, capped at
+    ``_TEXT_PREVIEW_LIMIT`` entries total. The full untruncated text ships on
+    the ``--json`` path (``renderer.emit``). Built as ``Text`` (not markup
+    strings) since node ids / node text are server-supplied and may contain
+    ``[...]`` that Rich would otherwise interpret as style markup. Shared by
+    the local and cloud pretty views so the two render the same text the same
+    way; the cloud one previously rendered none at all.
+
+    Both the node id and the text go through ``sanitize``. A ``Text`` cell
+    declines to *parse* markup but still forwards ``\\x1b``, as the badge in
+    ``_render_status_pretty`` already notes — and node text is the one cell
+    here whose content can come from a model describing an attacker-supplied
+    input, so an ANSI/OSC sequence in it would reach the terminal. The node id
+    is bounded as well: only the text body was length-capped before.
+    """
+    from rich.text import Text
+
+    if not isinstance(text_outputs, dict) or not text_outputs:
+        return []
+    preview_lines: list[Text] = []
+    total = sum(len(texts) for texts in text_outputs.values())
+    for node_id, texts in text_outputs.items():
+        for text in texts:
+            if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
+                break
+            # Slice before splitting: only the first ~120 chars of the first
+            # line survive, and `splitlines()` on a multi-megabyte single
+            # output would otherwise allocate one list entry per line of it.
+            stripped = str(text).strip()[:4096]
+            first = sanitize(stripped.splitlines()[0]) if stripped else ""
+            if len(first) > 120:
+                first = first[:117] + "…"
+            preview_lines.append(Text(f"[{sanitize(str(node_id))[:64]}] {first}"))
+        if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
+            break
+    if total > len(preview_lines):
+        preview_lines.append(Text(f"… ({total - len(preview_lines)} more)", style="dim"))
+    return preview_lines
 
 
 def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
@@ -1355,29 +1729,12 @@ def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
     tbl.add_row("status", badge)
     if snap.get("outputs"):
         tbl.add_row("outputs", "\n".join(sanitize_markup(o) for o in snap["outputs"]))
-    if snap.get("text_outputs"):
-        # Bounded preview: first non-blank line, ~120 chars per entry, capped at
-        # _TEXT_PREVIEW_LIMIT entries total. The full untruncated text ships on
-        # the `--json` path (renderer.emit). Built as Text (not markup strings)
-        # since node ids / node text are server-supplied and may contain `[...]`
-        # that Rich would otherwise interpret as style markup.
-        preview_lines: list[Text] = []
-        total = sum(len(texts) for texts in snap["text_outputs"].values())
-        for node_id, texts in snap["text_outputs"].items():
-            for text in texts:
-                if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
-                    break
-                stripped = str(text).strip()
-                first = stripped.splitlines()[0] if stripped else ""
-                if len(first) > 120:
-                    first = first[:117] + "…"
-                preview_lines.append(Text(f"[{node_id}] {first}"))
-            if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
-                break
-        if total > len(preview_lines):
-            preview_lines.append(Text(f"… ({total - len(preview_lines)} more)", style="dim"))
-        if preview_lines:
-            tbl.add_row("text", Text("\n").join(preview_lines))
+    if preview_lines := _text_preview_lines(snap.get("text_outputs")):
+        tbl.add_row("text", Text("\n").join(preview_lines))
+    if snap.get("note"):
+        # A completed run that saved nothing: say so here too, so the pretty
+        # view does not look like a successful run whose files went missing.
+        tbl.add_row("note", sanitize_markup(str(snap["note"])))
     if snap.get("error"):
         # Truncate first, escape second: the 600-char budget stays a budget on
         # the server's text rather than on the backslashes we add to it, and
@@ -1576,6 +1933,16 @@ def wait_cmd(
             row["outputs"] = snap["outputs"]
         if snap.get("error_message"):
             row["error_message"] = snap["error_message"]
+        if snap.get("note"):
+            # Without this the row is a bare `completed` with no `outputs`, and
+            # the caller has to go and ask `jobs status` the same question it
+            # just waited for an answer to. The row is the whole result of a
+            # wait, so the one thing that explains an empty one belongs on it.
+            row["note"] = snap["note"]
+        if "warnings" in snap:
+            # The --output-node-ids verdict of a targeted cloud job: the row
+            # is the whole result of the wait, so it carries the verdict too.
+            row["warnings"] = snap["warnings"]
         jobs_list.append(row)
 
     completed = sum(1 for r in jobs_list if r["status"] == "completed")
@@ -1864,56 +2231,284 @@ def _client_id_from_extra_data(extra: Any) -> str | None:
     return None
 
 
-def _resolve_watch_client_id(host: str, port: int, prompt_id: str) -> str | None:
-    """Find the ``client_id`` this prompt was submitted with, or None.
+def _borrowed_from_extra_data(extra: Any) -> bool:
+    """Read ``comfy run --client-id``'s marker back off a queue/history entry.
+
+    The marker rides ``extra_data`` rather than only our own state file because
+    the submitter and the watcher are routinely different processes with
+    different config roots — the in-app agent runs the CLI under a sandboxed
+    ``HOME`` it deletes at turn end, so the user's own `jobs watch` can never
+    see that run's state file. ComfyUI preserves unknown ``extra_data`` keys
+    (only the two credential keys are stripped) and exposes the slot through
+    both ``/queue`` and ``/history``, so this is the one signal every watcher
+    can read.
+    """
+    return isinstance(extra, dict) and extra.get(jobs_state.BORROWED_CLIENT_ID_KEY) is True
+
+
+# Why a watch polls instead of attaching. `borrowed` is a positive finding: the
+# prompt carries the marker. `indeterminate` is the absence of one we could not
+# confirm — see `_select_watch_client_id`. They are not interchangeable: only
+# the first licenses "drop --client-id", the second asks for a retry.
+_PollReason = Literal["borrowed", "indeterminate"]
+
+
+# Four distinct situations collapse into the two published `reason` values, and
+# the advice differs even where the reason does not: dropping `--client-id`
+# makes a run whose own marker is set POLL, but makes the other three ATTACH
+# under their own resolved id. A single message per reason told half of them the
+# opposite of what happens. `reason` stays the documented pair; the cause only
+# picks the wording.
+_RejectCause = Literal["prompt_borrowed", "id_borrowed", "census_unread", "nothing_vouched"]
+
+_REJECTION_TEXT: dict[_RejectCause, tuple[_PollReason, str, str]] = {
+    "prompt_borrowed": (
+        "borrowed",
+        "This run borrowed another client's live socket and can only be watched by polling",
+        "drop --client-id; comfy jobs watch will poll this run safely",
+    ),
+    "id_borrowed": (
+        "borrowed",
+        "--client-id names a client that another queued run is feeding on purpose; attaching as it "
+        "would cut that client off",
+        "drop --client-id — this prompt resolves its own submitting client and attaches normally",
+    ),
+    "census_unread": (
+        "indeterminate",
+        "Could not confirm --client-id is free to attach as: the /queue read that lists the clients "
+        "other runs are feeding did not come back whole",
+        "retry once the server answers, or drop --client-id to attach as this prompt's own submitting client",
+    ),
+    "nothing_vouched": (
+        "indeterminate",
+        "Could not confirm that --client-id is safe to attach as: this prompt has no record we "
+        "could read, so whether it borrowed a live client's socket is unknown",
+        "drop --client-id and comfy jobs watch will poll this run safely; if the server was "
+        "briefly unreachable, retry — if the prompt_id is a typo or already pruned, no id works",
+    ),
+}
+
+
+class _ClientIdRejected(ValueError):
+    """An explicit ``--client-id`` the watch must not honour, and why.
+
+    Subclasses ValueError so the cause rides the exception rather than being
+    re-derived at the call site, where the second lookup it would need could
+    disagree with the one that made the decision.
+    """
+
+    def __init__(self, cause: _RejectCause) -> None:
+        super().__init__(cause)
+        self.cause: _RejectCause = cause
+        self.reason: _PollReason = _REJECTION_TEXT[cause][0]
+
+    @property
+    def text(self) -> tuple[str, str]:
+        """The message and hint this cause should be reported with."""
+        return _REJECTION_TEXT[self.cause][1:]
+
+
+# How long a poll-only watch waits before reconciling. The ordinary `--timeout`
+# is a silence budget for a socket that SHOULD be receiving events; here there
+# is no socket at all, so it would be dead air. This raises the reconcile
+# cadence for the whole watch, not just the first read, which is affordable
+# against a loopback/LAN ComfyUI.
+_POLL_ONLY_WATCH_POLL_S = 2.0
+_WATCH_HISTORY_SETTLE_S = 2.0
+_WATCH_HISTORY_RETRY_S = 0.05
+
+
+def _settled_terminal_snapshot(host: str, port: int, prompt_id: str) -> dict | None:
+    """Read the terminal history record after a live completion, with a short bound.
+
+    ComfyUI can publish ``execution_success`` just before the corresponding
+    history record becomes visible.  A watch must not turn that ordering gap
+    into a permanently missing completion note, but it also must not wait
+    indefinitely when history storage is unavailable.
+    """
+    deadline = time.monotonic() + _WATCH_HISTORY_SETTLE_S
+    snapshot = None
+    while True:
+        snapshot = _snapshot(host, port, prompt_id, deadline=deadline)
+        if snapshot and snapshot.get("status") in {"completed", "error", "cancelled"}:
+            return snapshot
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return snapshot
+        time.sleep(min(_WATCH_HISTORY_RETRY_S, remaining))
+
+
+def _get_json_object(url: str) -> dict[str, Any]:
+    """GET a JSON **object**, or an empty one if anything at all went wrong.
+
+    A failed fetch and a 200 carrying valid JSON of the wrong shape (a proxy
+    error page, a captive portal) collapse to the same empty mapping on
+    purpose: neither is a record, and the only caller treats "no record" as "we
+    did not establish anything".
+    """
+    try:
+        body = _http_get_json(url)
+    except RuntimeError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+class _SubmittedRecord(NamedTuple):
+    """Everything one pass over the server's two stores established.
+
+    ``borrowed_ids`` comes from the same ``/queue`` body as ``extra`` because
+    the two answer different questions and both are needed before a socket
+    opens: the marker rides a PROMPT, but what it protects is a SOCKET, and a
+    caller can name a live client's id while watching a different prompt
+    entirely. Collected in one pass so the two cannot disagree.
+
+    Each has its own "we actually read it" flag, and they are NOT the same
+    fact. ``read`` covers this prompt's own record; ``queue_read`` covers the
+    queue-wide census behind ``borrowed_ids``, which is empty both when no run
+    has borrowed anything and when the fetch failed. Collapsing them would let
+    a blipped ``/queue`` pass for "nobody is borrowing" — the same absence-of-
+    evidence reasoning the rest of this module exists to refuse.
+    """
+
+    extra: Any
+    read: bool
+    borrowed_ids: frozenset[str]
+    queue_read: bool
+
+
+def _submitted_extra_data(host: str, port: int, prompt_id: str) -> _SubmittedRecord:
+    """This prompt's ``extra_data`` as the SERVER has it, and whether that record
+    was POSITIVELY READ.
+
+    Reads ``/queue`` while the prompt is pending or running, then ``/history``
+    once it has finished. The flag is the part that matters for safety: a
+    caller deciding whether a prompt is marked borrowed must not read the
+    failure to find the record as proof the marker is not on it. Mirrors
+    ``_server_confirms_no_record`` — a negative needs a positive confirmation,
+    never an absence of evidence.
+
+    Only one thing counts as having read the record: matching ``prompt_id`` in
+    one of the two stores AND being able to reach its ``extra_data`` slot. Every
+    other outcome is reported as "not read" — the fetch failed, the body was the
+    wrong shape, a queue section was missing or unwalkable, the prompt was
+    nowhere to be found, or the matched entry was too short to carry the slot.
+    Deliberately NOT reasoning about which endpoints answered: that invites
+    treating a body that merely failed to mention the prompt as a conclusive
+    absence, which is the very inference this exists to refuse.
+    """
+    queue = _get_json_object(f"http://{host}:{port}/queue")
+    sections = [queue.get(key) for key in ("queue_running", "queue_pending")]
+    # Both, not either: a borrowed run sitting in the section we could not walk
+    # would be missing from the census without the census knowing it.
+    queue_read = all(isinstance(entries, list) for entries in sections)
+
+    borrowed: set[str] = set()
+    hit: tuple[Any, bool] | None = None
+    for entries in sections:
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            # entry layout: number, prompt_id, prompt, extra_data, outputs_to_execute
+            if not (isinstance(entry, list) and len(entry) > 1):
+                continue
+            extra = entry[3] if len(entry) > 3 else None
+            if _borrowed_from_extra_data(extra):
+                fed = _client_id_from_extra_data(extra)
+                if fed:
+                    borrowed.add(fed)
+            if hit is None and entry[1] == prompt_id:
+                hit = (extra, True) if isinstance(extra, dict) else (None, False)
+
+    if hit is not None:
+        return _SubmittedRecord(hit[0], hit[1], frozenset(borrowed), queue_read)
+
+    history = _get_json_object(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
+    body = history.get(prompt_id)
+    prompt = body.get("prompt") if isinstance(body, dict) else None
+    if isinstance(prompt, list) and len(prompt) > 3 and isinstance(prompt[3], dict):
+        return _SubmittedRecord(prompt[3], True, frozenset(borrowed), queue_read)
+    return _SubmittedRecord(None, False, frozenset(borrowed), queue_read)
+
+
+def _select_watch_client_id(
+    host: str, port: int, prompt_id: str, requested: str | None
+) -> tuple[str | None, _PollReason | None]:
+    """Pick the socket identity to attach as, or a reason to poll instead.
 
     ComfyUI delivers execution events only to the submitting session's socket
     (see the module docstring), so watching with a fresh id yields silence. The
-    submitting id is recoverable from three places, cheapest first:
-
-    1. our own on-disk job state, written at submit time by ``comfy run``;
-    2. ``/queue`` ``extra_data`` while the prompt is running or pending;
-    3. ``/history`` ``prompt[3]`` once it has finished.
+    submitting id is recoverable from our own on-disk job state, written at
+    submit time by ``comfy run``, and from the ``extra_data`` the server echoes
+    back through ``/queue`` and ``/history``.
 
     Reconnecting under an existing id is ComfyUI's own session-resume mechanism
     (its ``/ws`` handler pops the previous socket for that id), which is exactly
     what we want for a prompt whose submitter has exited — the common case, since
     ``comfy run --async`` returns immediately. The caveat is that a submitter
     still holding that socket (a browser tab, a blocking ``comfy run``) stops
-    receiving events until it reconnects; pass ``--client-id`` to override the
-    resolution when that matters.
-    """
-    from comfy_cli import jobs_state
+    receiving events until it reconnects.
 
+    A run submitted via ``comfy run --client-id`` is the one case where that
+    caveat is a certainty rather than a risk: the recorded id belongs to a live
+    client that is being fed on purpose. Those poll instead, and an explicit
+    override is refused rather than honoured — a marked prompt exists precisely
+    to feed another live socket, so attaching under the caller's id performs the
+    eviction the marker exists to prevent.
+
+    **Absence of that marker is evidence only once every place it could have
+    been read answered.** A failed read is not an unmarked record: the state
+    file is routinely invisible to the watcher (submitter and watcher run under
+    different config roots — the in-app agent uses a sandboxed ``HOME`` it
+    deletes at turn end), so a transient ``/queue`` + ``/history`` failure would
+    otherwise leave a borrowed run looking ordinary and let an explicit
+    ``--client-id`` evict the live client. Unverifiable ownership polls too, and
+    says so with its own reason, because the alternatives are asymmetric: a
+    retry costs a moment, a wrong attach silences the tab the run was for.
+
+    Reads the state file and the server record once each. Looking up the marker
+    and the client id separately leaves a queue-to-history transition between
+    them where an explicit borrowed id can be accepted after the marker vanishes
+    from the first endpoint but before it appears in the second.
+    """
     try:
         job = jobs_state.read(prompt_id)
     except (ValueError, OSError):  # unsafe prompt_id / unreadable state dir
         job = None
-    if job is not None and isinstance(job.client_id, str) and job.client_id.strip():
-        return job.client_id
+    record = _submitted_extra_data(host, port, prompt_id)
+    extra, record_read = record.extra, record.read
 
-    try:
-        q = _http_get_json(f"http://{host}:{port}/queue")
-    except RuntimeError:
-        q = {}
-    if isinstance(q, dict):
-        for key in ("queue_running", "queue_pending"):
-            for entry in q.get(key) or []:
-                # entry layout: number, prompt_id, prompt, extra_data, outputs_to_execute
-                if isinstance(entry, list) and len(entry) > 3 and entry[1] == prompt_id:
-                    cid = _client_id_from_extra_data(entry[3])
-                    if cid:
-                        return cid
+    if (job is not None and job.client_id_borrowed) or _borrowed_from_extra_data(extra):
+        if requested:
+            raise _ClientIdRejected("prompt_borrowed")
+        return None, "borrowed"
 
-    try:
-        h = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
-    except RuntimeError:
-        return None
-    body = h.get(prompt_id) if isinstance(h, dict) else None
-    prompt = body.get("prompt") if isinstance(body, dict) else None
-    if isinstance(prompt, list) and len(prompt) > 3:
-        return _client_id_from_extra_data(prompt[3])
-    return None
+    # The watched prompt is clean, but the id the caller named may not be: it
+    # can belong to a client some OTHER queued run is feeding on purpose.
+    # Attaching would evict it just the same, so the id is checked against
+    # every borrowed run the queue is carrying, not only against this prompt.
+    if requested and requested in record.borrowed_ids:
+        raise _ClientIdRejected("id_borrowed")
+
+    # ...and that check is worth exactly as much as the read behind it. An
+    # empty census means "nobody is borrowing" only once the queue was actually
+    # walked; otherwise it means "we have no idea", which must not read as
+    # consent. Deliberately not folded into the state-file test below: a local
+    # record vouches for THIS run, and says nothing about whose socket the
+    # caller just named.
+    if requested and not record.queue_read:
+        raise _ClientIdRejected("census_unread")
+
+    # A state file is its own positive evidence: `comfy run` wrote it, and it
+    # says this run did not borrow. Failing that, only the prompt's own server
+    # record can clear it — a record we could not read says nothing, and a
+    # server that simply never mentioned the prompt says nothing either.
+    if job is None and not record_read:
+        if requested:
+            raise _ClientIdRejected("nothing_vouched")
+        return None, "indeterminate"
+
+    recorded = job.client_id if job is not None and isinstance(job.client_id, str) and job.client_id.strip() else None
+    return requested or recorded or _client_id_from_extra_data(extra), None
 
 
 def _history_completed_nodes(host: str, port: int, prompt_id: str) -> set[str]:
@@ -1927,7 +2522,7 @@ def _history_completed_nodes(host: str, port: int, prompt_id: str) -> set[str]:
     """
     nodes: set[str] = set()
     try:
-        h = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+        h = _http_get_json(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
     except RuntimeError:
         return nodes
     body = h.get(prompt_id) if isinstance(h, dict) else None
@@ -1944,8 +2539,12 @@ def _history_completed_nodes(host: str, port: int, prompt_id: str) -> set[str]:
             listed = msg[1].get("executed")
         else:
             continue
-        for n in listed or []:
-            nodes.add(str(n))
+        if not isinstance(listed, list):
+            continue
+        # Same null guard as the live `_watch_execution_cached` path: this set
+        # becomes the terminal envelope's completed nodes, and `str(None)`
+        # would seat a fabricated `"None"` node in it.
+        nodes.update(str(n) for n in listed if n is not None)
     outputs = body.get("outputs")
     if isinstance(outputs, dict):
         nodes.update(str(n) for n in outputs)
@@ -1971,6 +2570,10 @@ class _WatchState:
     outputs: list[str] = field(default_factory=list)
     end_reason: str | None = None
     end_details: Any = None
+    # The WS `execution_error` event payload, when the watch ended on one. The
+    # poll/snapshot exits carry the same record under `end_details["error"]`;
+    # both are surfaced as the envelope's `execution_error`.
+    execution_error: dict[str, Any] | None = None
     terminal: bool = False
     # Nodes whose final (100% / errored) `progress` line has already been
     # emitted. `progress_state` repeats EVERY non-pending node on every
@@ -1996,17 +2599,29 @@ def _watch_executing(state: _WatchState, data: dict[str, Any]) -> None:
 
 
 def _watch_execution_cached(state: _WatchState, data: dict[str, Any]) -> None:
-    nodes = data.get("nodes") or []
+    # ONE event per cached node, matching what `comfy run` emits
+    # (run/execution.py `on_cached`). The two streams are documented as one
+    # dialect, so a consumer counting cached nodes per event must not have to
+    # special-case a list-shaped `nodes` here. `title`/`class_type` are omitted:
+    # watch has no workflow map to resolve them from, and both are optional in
+    # the run dialect's own emission.
+    nodes = data.get("nodes")
+    # A non-list (e.g. the string "34") is not a node list: iterating it
+    # would invent ids from its characters and seat them in completed_nodes.
+    # The /history path already ignores this shape; the live handler must too.
+    if not isinstance(nodes, list):
+        return
     for n in nodes:
         state.completed_nodes.add(str(n))
     renderer = state.renderer
     if renderer.is_pretty():
         renderer.console().print(f"[dim]✓[/dim] cached: {len(nodes)} node(s)")
-    renderer.event(
-        "execution_cached",
-        nodes=[str(n) for n in nodes],
-        prompt_id=state.prompt_id,
-    )
+    for n in nodes:
+        renderer.event(
+            "execution_cached",
+            node=str(n),
+            prompt_id=state.prompt_id,
+        )
 
 
 def _watch_progress(state: _WatchState, data: dict[str, Any]) -> None:
@@ -2107,6 +2722,7 @@ def _watch_execution_error(state: _WatchState, data: dict[str, Any]) -> None:
     _absorb_executed_list(state, data)
     state.end_reason = "error"
     state.end_details = data
+    state.execution_error = data
     state.terminal = True
 
 
@@ -2149,7 +2765,16 @@ def watch_cmd(
     prompt_id: Annotated[str, typer.Argument(help="The prompt_id returned by `comfy run`.")],
     host: Annotated[str | None, typer.Option()] = None,
     port: Annotated[int | None, typer.Option()] = None,
-    timeout: Annotated[int, typer.Option(help="Per-recv (or per-poll) timeout in seconds.")] = 30,
+    timeout: Annotated[
+        int,
+        typer.Option(
+            help=(
+                "Per-recv (or per-poll) timeout in seconds. A watch that polls instead of "
+                "attaching (a borrowed run, or one whose record cannot be read) has no recv to "
+                "time out: it reconciles every 2s, and this only sizes its not-found deadline."
+            )
+        ),
+    ] = 30,
     where: Annotated[
         str | None,
         typer.Option("--where", help="'local' (WebSocket) or 'cloud' (HTTP polling)."),
@@ -2169,12 +2794,32 @@ def watch_cmd(
             help=(
                 "Local-only: attach as this WS client_id instead of the submitting one. "
                 "ComfyUI sends execution events only to the submitting session, so watch "
-                "resolves that id automatically; override it if resolution picks wrong."
+                "resolves that id automatically; override it as a last resort if resolution "
+                "picks wrong. Refused on a run that borrowed a live client's socket, on an id "
+                "another queued run borrowed, and whenever the records that would show either "
+                "cannot be read — attaching could cut that client off."
             ),
         ),
     ] = None,
 ):
     renderer = get_renderer()
+
+    # Ahead of the cloud branch and the server probe, because this needs
+    # neither: it reads one string. `comfy run` validates it just as early, and
+    # anywhere later the flag is silently dropped on the paths that return
+    # first — a cloud target, or a local server that is down. Left unstripped,
+    # "  " would be attached as a literal client_id that can never receive
+    # anything.
+    if client_id is not None and not client_id.strip():
+        renderer.error(
+            code="client_id_rejected",
+            message="--client-id must not be empty",
+            hint="pass the submitting client's id, or omit --client-id to resolve it automatically",
+            details={"reason": "empty"},
+        )
+        raise typer.Exit(code=1)
+    client_id = client_id.strip() if client_id is not None else None
+
     if _stamp_where(renderer, where) == "cloud":
         return _cloud_watch(prompt_id, poll_interval=poll_interval, max_wait=max_wait)
 
@@ -2194,31 +2839,55 @@ def watch_cmd(
         # ended, so no session was attached and there is no id to report.
         snap["client_id"] = None
         snap["attached"] = False
+        # No socket, but not withheld either — the prompt simply ended first.
+        # The key is still published so a consumer that branches on it never
+        # hits a missing one, as with `client_id` and `attached`.
+        snap["poll_reason"] = None
         if renderer.is_pretty():
             renderer.console().print(f"[dim]Prompt {prompt_id} already {snap['status']}; nothing more to watch.[/dim]")
+            # Before the promotion below, which moves the key this renders from.
             _render_status_pretty(snap, host=h, port=p)
+        # Same promotion the live path does when it ends. `_emit_terminal`
+        # keys its trimming and redaction on `execution_error`, so a failure
+        # left where `_snapshot` puts it reaches the envelope whole — full
+        # traceback, and a `current_inputs` that can hold an api_key.
+        if isinstance(snap.get("error"), dict):
+            snap["execution_error"] = snap.pop("error")
         _emit_terminal(renderer, snap, command="jobs watch")
         return
 
-    ws = WebSocket()
     # Re-attach as the submitting session, otherwise the server addresses every
     # execution event to a socket we are not holding and this watch sees nothing.
-    attached_client_id = client_id or _resolve_watch_client_id(h, p, prompt_id)
-    ws_client_id = attached_client_id or str(uuid.uuid4())
     try:
-        ws.connect(f"ws://{h}:{p}/ws?clientId={urllib.parse.quote(ws_client_id, safe='')}")
-    except (WebSocketException, ConnectionError, OSError) as e:
+        attached_client_id, poll_reason = _select_watch_client_id(h, p, prompt_id, client_id)
+    except _ClientIdRejected as e:
+        message, hint = e.text
         renderer.error(
-            code="ws_disconnected",
-            message=f"Could not open WebSocket: {e}",
-            hint="check the server is reachable; try `comfy jobs status` instead",
+            code="client_id_rejected",
+            message=message,
+            hint=hint,
+            details={"reason": e.reason},
         )
         raise typer.Exit(code=1)
 
+    poll_only = poll_reason is not None
     token = cancellation.get_token()
-    token.on_cancel(lambda: _safe_close_ws(ws))
-
-    ws.settimeout(timeout)
+    ws = None
+    ws_client_id = None
+    if not poll_only:
+        ws = WebSocket()
+        ws_client_id = attached_client_id or str(uuid.uuid4())
+        try:
+            ws.connect(f"ws://{h}:{p}/ws?clientId={urllib.parse.quote(ws_client_id, safe='')}")
+        except (WebSocketException, ConnectionError, OSError) as e:
+            renderer.error(
+                code="ws_disconnected",
+                message=f"Could not open WebSocket: {e}",
+                hint="check the server is reachable; try `comfy jobs status` instead",
+            )
+            raise typer.Exit(code=1)
+        token.on_cancel(lambda: _safe_close_ws(ws))
+        ws.settimeout(timeout)
 
     state = _WatchState(renderer=renderer, prompt_id=prompt_id, host=h, port=p)
     saw_any_event = False
@@ -2227,7 +2896,19 @@ def watch_cmd(
 
     if renderer.is_pretty():
         renderer.console().print(f"[bold]Watching prompt[/bold] {prompt_id} on {h}:{p}   [dim](Ctrl-C to stop)[/dim]")
-        if attached_client_id is None:
+        if poll_reason == "borrowed":
+            renderer.console().print(
+                "[yellow]![/yellow] [dim]this run was submitted for another client (comfy run "
+                "--client-id) so that client receives its live events; attaching as it would cut "
+                "it off, so this watch polls status instead[/dim]"
+            )
+        elif poll_reason == "indeterminate":
+            renderer.console().print(
+                "[yellow]![/yellow] [dim]could not confirm whether this run was submitted for another "
+                "client — no record of it could be read, so no socket was opened and this watch polls "
+                "status instead[/dim]"
+            )
+        elif attached_client_id is None:
             renderer.console().print(
                 "[yellow]![/yellow] [dim]could not resolve the submitting client_id — the server "
                 "may not send live events for this prompt; pass --client-id if you know it[/dim]"
@@ -2235,9 +2916,31 @@ def watch_cmd(
 
     try:
         while True:
-            try:
-                raw = ws.recv()
-            except WebSocketTimeoutException:
+            raw = None
+            poll_now = poll_only
+            if poll_only:
+                if token.wait(_POLL_ONLY_WATCH_POLL_S):
+                    state.end_reason = "cancelled"
+                    break
+            else:
+                try:
+                    raw = ws.recv()
+                except WebSocketTimeoutException:
+                    poll_now = True
+                except (WebSocketException, ConnectionError, OSError) as e:
+                    # Cancellation closes the socket out from under recv(). Check
+                    # the token before classifying as "server disconnected".
+                    if token.is_set():
+                        state.end_reason = "cancelled"
+                        break
+                    renderer.error(
+                        code="ws_disconnected",
+                        message=f"Lost connection while watching {prompt_id}: {e}",
+                        hint="re-run `comfy jobs status` to check final state",
+                    )
+                    raise typer.Exit(code=1) from e
+
+            if poll_now:
                 # If the job moved to completed between recvs, exit cleanly.
                 snap = _snapshot(h, p, prompt_id)
                 if snap and snap["status"] in {"completed", "error", "cancelled"}:
@@ -2264,18 +2967,6 @@ def watch_cmd(
                 else:
                     missing_deadline = None
                 continue
-            except (WebSocketException, ConnectionError, OSError) as e:
-                # Cancellation closes the socket out from under recv(). Check
-                # the token before classifying as "server disconnected".
-                if token.is_set():
-                    state.end_reason = "cancelled"
-                    break
-                renderer.error(
-                    code="ws_disconnected",
-                    message=f"Lost connection while watching {prompt_id}: {e}",
-                    hint="re-run `comfy jobs status` to check final state",
-                )
-                raise typer.Exit(code=1) from e
             if not isinstance(raw, str):
                 continue
             try:
@@ -2296,7 +2987,8 @@ def watch_cmd(
                 if state.terminal:
                     break
     finally:
-        _safe_close_ws(ws)
+        if ws is not None:
+            _safe_close_ws(ws)
 
     elapsed = time.time() - start
     final_status = state.end_reason or ("completed" if state.completed_nodes else "unknown")
@@ -2329,9 +3021,36 @@ def watch_cmd(
         # silence, so it belongs in the envelope rather than only in the logs.
         "client_id": ws_client_id,
         "attached": attached_client_id is not None,
+        # Why no socket was opened, when none was. Pretty mode explains this in
+        # prose; without it here a --json consumer sees `attached: false` and
+        # cannot tell the two apart, though they want opposite responses —
+        # `borrowed` means drop --client-id, `indeterminate` means retry.
+        "poll_reason": poll_reason,
     }
+    if final_status == "completed":
+        # A live WebSocket completion does not carry the raw /history outputs
+        # that `_snapshot` classifies.  Copy only its explanatory note into the
+        # live envelope; the stream remains authoritative for output URLs and
+        # all of the watch metadata above.
+        terminal_snapshot = state.end_details if isinstance(state.end_details, dict) else None
+        if not terminal_snapshot or terminal_snapshot.get("status") not in {"completed", "error", "cancelled"}:
+            terminal_snapshot = _settled_terminal_snapshot(h, p, prompt_id)
+        if isinstance(terminal_snapshot, dict) and isinstance(terminal_snapshot.get("note"), str):
+            payload["note"] = terminal_snapshot["note"]
+            if renderer.is_pretty():
+                from rich.text import Text
+
+                renderer.console().print(Text(sanitize(payload["note"]), style="dim"))
     if state.end_details is not None:
-        payload["details"] = state.end_details if isinstance(state.end_details, dict) else {"raw": state.end_details}
+        details = dict(state.end_details) if isinstance(state.end_details, dict) else {"raw": state.end_details}
+        if final_status == "error" and isinstance(details.get("error"), dict):
+            payload["execution_error"] = details.pop("error")
+        payload["details"] = details
+    if final_status == "error" and "execution_error" not in payload and isinstance(state.execution_error, dict):
+        # Live exit: the event itself is the structured record (the same shape
+        # `/history` stores under `status.messages`), so promote it too — one
+        # key for the failure whichever way the watch ended.
+        payload["execution_error"] = dict(state.execution_error)
     if not saw_any_event and final_status == "unknown":
         payload["hint"] = "watch returned without events; the prompt may already have completed"
     _emit_terminal(renderer, payload, command="jobs watch")
@@ -2359,9 +3078,23 @@ def _is_cloud(where: str | None) -> bool:
     try:
         decision = where_module.resolve_default(flag=where)
     except ValueError:
-        # Invalid value — fall back to local; the validating command
-        # (cmdline.py top-level option) will surface ``where_invalid``.
-        return False
+        # An invalid persisted ``where_default`` shouldn't be fatal; fall back to
+        # the flag (if valid) or auto-detect with the bad config value dropped.
+        try:
+            decision = where_module.resolve(flag=where, config_value=None)
+        except ValueError as exc:
+            # The flag/env/project value itself is bad, so dropping the config
+            # changed nothing and no further fallback can make it valid. Emit the
+            # shared ``where_invalid`` envelope and exit, exactly as ``nodes``
+            # does — this used to `return False`, on the assumption that
+            # ``cmdline.py``'s top-level ``--where`` had already validated the
+            # value, but that only covers ``comfy --where X jobs ls``. A
+            # per-command ``comfy jobs ls --where bogus`` (or an exported
+            # ``COMFY_WHERE=bogus``) reaches no such validator, so it silently
+            # routed to local and exited 0 with ``ok: true``: a machine consumer
+            # got a successful *local* answer to a question about a target it
+            # never named.
+            raise where_module.where_invalid_exit(exc) from exc
     return decision.target is where_module.WhereTarget.CLOUD
 
 
@@ -2494,10 +3227,67 @@ def _ms_to_iso(value: Any) -> str | None:
         return None
 
 
+def _recorded_id_list(value: Any) -> list[str] | None:
+    """A node-id list read back from a job state file, or None when it is not
+    one. ``jobs_state.read`` checks keys, not types, so a hand-edited file can
+    carry a bare string (which iterates as one id per character) or nested
+    lists; neither may reach the targets check."""
+    if not isinstance(value, list) or not value:
+        return None
+    if not all(isinstance(v, (str, int)) and not isinstance(v, bool) for v in value):
+        return None
+    return [str(v) for v in value]
+
+
+def _recorded_targets_warnings(prompt_id: str, record: Any) -> list[dict] | None:
+    """The ``--output-node-ids`` verdict for a completed cloud job, judged
+    against the targets ``comfy run`` recorded on its state file. None for a
+    job with no (usable) recorded targets, so its snapshot keeps its shape.
+
+    The history record can lag ``completed`` (absent, or status-only with no
+    ``outputs``). Judging then would report every target missing, so the
+    verdict says the check could not run yet instead."""
+    from comfy_cli import jobs_state
+
+    job = jobs_state.read(prompt_id)
+    if job is None:
+        return None
+    targets = _recorded_id_list(job.output_node_ids)
+    if targets is None:
+        return None
+    run_graph = _recorded_id_list(job.run_graph_node_ids) if job.run_graph_node_ids is not None else targets
+    if run_graph is None:
+        return None
+    if not isinstance(record, dict) or not isinstance(record.get("outputs"), dict):
+        unchecked_warnings: list[dict] = []
+        unchecked_warnings.append(
+            {
+                "code": "output_node_ids_unchecked",
+                "message": (
+                    "the cloud has not returned this job's outputs yet, so --output-node-ids could not be "
+                    f"checked; run `comfy jobs status {prompt_id} --where cloud` again"
+                ),
+            }
+        )
+        return unchecked_warnings
+    from comfy_cli.command.run import _targeted_run_warnings
+
+    graph_outputs = _recorded_id_list(job.graph_output_node_ids) if job.graph_output_node_ids is not None else None
+    return _targeted_run_warnings(
+        record, targets, dict.fromkeys(run_graph), bool(job.output_node_ids_checked), graph_outputs
+    )
+
+
+def _print_snapshot_warnings(renderer, snap: dict) -> None:
+    for w in snap.get("warnings") or []:
+        if isinstance(w, dict) and w.get("message"):
+            renderer.console().print(f"[yellow]⚠ {sanitize_markup(str(w['message']))}[/yellow]")
+
+
 def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     """Compose a cloud snapshot from /api/jobs/<id> + /api/history_v2/<id>."""
     from comfy_cli import jobs_state
-    from comfy_cli.comfy_client import _group_outputs
+    from comfy_cli.comfy_client import _group_outputs, extract_text_outputs
 
     client = _cloud_client()
     status = client.get_job_status(prompt_id)
@@ -2524,16 +3314,36 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     outputs: list[str] = []
     outputs_by_node: dict[str, list[str]] = {}
     outputs_by_item: dict[str, list[str]] = {}
+    text_outputs: dict[str, list[str]] = {}
+    record_outputs: Any = None
+    targeted_warnings: list[dict] | None = None
+    record: Any = None
     if state == "completed":
         record = client.get_history(prompt_id)
         if record:
+            # The raw map, for `_nothing_to_show_note`'s own census — see there
+            # for why WHICH note is chosen cannot be decided on the extracted
+            # views below (they recognize a narrower set of shapes than the
+            # record, and than cloud's own output count).
+            record_outputs = record.get("outputs")
             node_outputs = client.extract_outputs(record)
             outputs = [o["url"] for o in node_outputs]
+            # Text/STRING node outputs live under outputs[node]["text"] as bare
+            # strings, which the media flatten above drops. The local snapshot
+            # has carried them since the key was added; cloud did not, so
+            # `comfy download`'s text-only hint ("read the text with
+            # `comfy jobs status <id>`") pointed at a cloud payload that could
+            # not answer it. Same source record, so no extra request.
+            text_outputs = extract_text_outputs(record)
             # The compose item_map (foreach item -> node ids) lives on the
             # job state file, written at submit time by `comfy run`.
             job = jobs_state.read(prompt_id)
             item_map = job.item_map if job is not None else None
             outputs_by_node, outputs_by_item = _group_outputs(node_outputs, item_map)
+        # A `comfy run --output-node-ids` job is judged on its targets here,
+        # the same check `comfy run --wait` runs, so an async run, `jobs watch`
+        # and `jobs wait` also warn when the server ignored the targets.
+        targeted_warnings = _recorded_targets_warnings(prompt_id, record)
 
     # `/api/jobs/<id>` (JobDetailResponse) serves the failure cause as a
     # structured `execution_error` object and the timestamps as Unix-ms ints —
@@ -2563,7 +3373,7 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     # everything through `execution_errors.parse_error_message`.
     error_message = (_execution_error_line(raw_execution_error) if failed else None) or status.get("error_message")
 
-    return {
+    snap: dict[str, Any] = {
         "prompt_id": prompt_id,
         "status": state,
         # The server's own spelling, before canonicalization. Always present so
@@ -2574,6 +3384,14 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
         "outputs": outputs,
         "outputs_by_node": outputs_by_node,
         "outputs_by_item": outputs_by_item,
+        # Same always-present additive key the local snapshot carries: full
+        # untruncated strings for `--json`. `{}` when the run emitted no text —
+        # and also, for now, on any non-completed status, since the history
+        # record is only fetched in the completed branch above. So a failed
+        # cloud run reports `{}` even if an earlier node emitted text, where
+        # the local snapshot would surface that partial text; fetching history
+        # for a failed cloud job is a separate change.
+        "text_outputs": text_outputs,
         # Not served by the plural jobs-detail endpoint at all — kept so an
         # older deployment still populates it; never synthesized.
         "assigned_inference": status.get("assigned_inference"),
@@ -2586,6 +3404,13 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
         "updated_at": status.get("updated_at") or _ms_to_iso(status.get("update_time")),
         "base_url": client.target.base_url,
     }
+    if targeted_warnings is not None:
+        # Present only for a targeted job, so every other snapshot keeps its
+        # shape. Same entries as `comfy run --wait`'s `data.warnings`.
+        snap["warnings"] = targeted_warnings
+    if note := _nothing_to_show_note(state, record_outputs, where="cloud"):
+        snap["note"] = note
+    return snap
 
 
 def _cloud_status(prompt_id: str) -> None:
@@ -2632,6 +3457,15 @@ def _cloud_status(prompt_id: str) -> None:
             tbl.add_row("error", sanitize_markup(str(snap["error_message"])[:600]))
         for u in snap.get("outputs") or []:
             tbl.add_row("output", sanitize_markup(u))
+        if preview_lines := _text_preview_lines(snap.get("text_outputs")):
+            from rich.text import Text
+
+            tbl.add_row("text", Text("\n").join(preview_lines))
+        if snap.get("note"):
+            tbl.add_row("note", sanitize_markup(str(snap["note"])))
+        for w in snap.get("warnings") or []:
+            if isinstance(w, dict) and w.get("message"):
+                tbl.add_row("warning", f"[yellow]{sanitize_markup(str(w['message']))}[/yellow]")
         renderer.console().print(tbl)
     renderer.emit(snap, command="jobs status", where="cloud")
 
@@ -2684,6 +3518,8 @@ def _cloud_watch(prompt_id: str, *, poll_interval: float, max_wait: float) -> No
                 renderer.event("output", url=u, prompt_id=prompt_id)
                 if renderer.is_pretty():
                     renderer.console().print(f"[bold green]✓[/bold green] output: [cyan]{sanitize_markup(u)}[/cyan]")
+            if renderer.is_pretty():
+                _print_snapshot_warnings(renderer, snap)
             final_snap = snap
             break
 

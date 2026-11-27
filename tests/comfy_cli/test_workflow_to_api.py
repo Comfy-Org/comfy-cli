@@ -9,6 +9,7 @@ import pytest
 
 from comfy_cli.workflow_to_api import (
     WorkflowConversionError,
+    _markers_omit_a_filled_widget,
     convert_ui_to_api,
     is_api_format,
     is_subgraph_uuid,
@@ -119,6 +120,16 @@ def _node(node_id, node_type, *, inputs=None, outputs=None, widgets=None, mode=0
 # ---------------------------------------------------------------------------
 # Format detection
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("spec", [{"type": "STRING"}, 7, []])
+def test_named_widget_survives_non_sequence_input_spec(object_info, spec):
+    object_info["CLIPTextEncode"]["input"]["required"]["text"] = spec
+    workflow = {"nodes": [_node(1, "CLIPTextEncode", widgets={"text": "keep this text"})], "links": []}
+
+    prompt = convert_ui_to_api(workflow, object_info)
+
+    assert prompt["1"]["inputs"] == {"text": "keep this text"}
 
 
 class TestIsApiFormat:
@@ -798,6 +809,31 @@ class TestMalformedInputHardening:
                     },
                 },
             ),
+            (
+                "subgraph_linkIds_scalar",
+                {
+                    "nodes": [
+                        {
+                            "id": 1,
+                            "type": "11111111-2222-3333-4444-555555555555",
+                            "inputs": [],
+                            "outputs": [],
+                        }
+                    ],
+                    "links": [],
+                    "definitions": {
+                        "subgraphs": [
+                            {
+                                "id": "11111111-2222-3333-4444-555555555555",
+                                "nodes": [],
+                                "links": [],
+                                "inputs": [{"name": "x", "linkIds": 1}],
+                                "outputs": [],
+                            }
+                        ]
+                    },
+                },
+            ),
         ]
         for _label, workflow in cases:
             # Should not raise — each malformed link is silently skipped.
@@ -900,6 +936,58 @@ class TestMalformedInputHardening:
         # Should not raise.
         convert_ui_to_api(workflow, object_info)
 
+    def test_overlay_accepts_scalar_definition_nodes_and_instance_inputs(self, object_info):
+        sg_uuid = "11111111-2222-3333-4444-555555555555"
+        workflow = {
+            "nodes": [{"id": 1, "type": sg_uuid, "inputs": 1, "outputs": []}],
+            "links": [],
+            "definitions": {"subgraphs": [{"id": sg_uuid, "nodes": 1, "links": [], "inputs": []}]},
+        }
+
+        assert convert_ui_to_api(workflow, object_info) == {}
+
+    def test_definition_expansion_metrics_are_computed_once_per_definition(self, monkeypatch):
+        from comfy_cli import workflow_to_api as converter
+
+        sg_uuid = "11111111-2222-3333-4444-555555555555"
+        definition = {"id": sg_uuid, "nodes": [0, 0, 0], "links": [0, 0], "inputs": [], "outputs": []}
+        calls = 0
+        original = converter._definition_expansion_metrics
+
+        def counted(candidate):
+            nonlocal calls
+            calls += 1
+            return original(candidate)
+
+        monkeypatch.setattr(converter, "_definition_expansion_metrics", counted)
+        converter._expand_subgraphs(
+            [{"id": index, "type": sg_uuid, "inputs": [], "outputs": []} for index in range(20)],
+            [],
+            {sg_uuid: definition},
+        )
+
+        assert calls == 1
+
+    def test_promoted_overlay_has_one_per_conversion_visit_budget(self, monkeypatch):
+        from comfy_cli import workflow_to_api as converter
+
+        sg_uuid = "11111111-2222-3333-4444-555555555555"
+        definition = {
+            "id": sg_uuid,
+            "nodes": [{"id": 1, "type": "Foo"}, {"id": 2, "type": "Foo"}],
+            "links": [],
+            "inputs": [],
+        }
+        workflow = {
+            "nodes": [{"id": 1, "type": sg_uuid, "inputs": [], "outputs": []}],
+            "links": [],
+            "definitions": {"subgraphs": [definition]},
+        }
+        monkeypatch.setattr(converter, "_MAX_SUBGRAPH_EXPANSION_BUDGET", 2)
+
+        with pytest.raises(WorkflowConversionError, match="overlay exceeded"):
+            converter._overlay_promoted_host_values({}, workflow, {sg_uuid: definition})
+
     def test_v3_combo_option_with_non_dict_inputs_keeps_node(self):
         # A V3 dynamic combo option whose ``inputs`` field is malformed
         # (string / list / etc., not the expected INPUT_TYPES-shaped dict)
@@ -938,6 +1026,45 @@ class TestMalformedInputHardening:
         # Node emitted, no crash, no silently-dropped node.
         assert result["1"]["class_type"] == "Foo"
         assert result["1"]["inputs"]["shape"] == "square"
+
+    def test_v3_combo_conversion_matches_server_boolean_numeric_equality(self):
+        object_info = {
+            "Foo": {
+                "input": {
+                    "required": {
+                        "shape": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {"key": 1, "inputs": {"required": {"number": ["INT", {}]}}},
+                                    {"key": True, "inputs": {"required": {"boolean": ["INT", {}]}}},
+                                ]
+                            },
+                        ]
+                    }
+                },
+                "input_order": {"required": ["shape"]},
+                "output_node": True,
+                "display_name": "Foo",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "Foo",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": [True, 7],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+
+        result = convert_ui_to_api(workflow, object_info)
+
+        assert result["1"]["inputs"] == {"shape": True, "shape.number": 7}
 
     def test_malformed_schema_input_does_not_crash(self):
         # Several helpers do ``schema.get("input") or {}`` then ``.get(section)``.
@@ -996,6 +1123,22 @@ class TestMalformedInputHardening:
             }
             result = convert_ui_to_api(workflow, object_info)
             assert "1" in result
+
+    @pytest.mark.parametrize("bad_section", [None, [], "malformed"])
+    @pytest.mark.parametrize("valid_section", ["required", "optional"])
+    def test_widget_conversion_keeps_valid_sibling_section(self, object_info, bad_section, valid_section):
+        schema = object_info["EmptyLatentImage"]
+        fields = schema["input"]["required"]
+        schema["input"] = {
+            valid_section: fields,
+            "optional" if valid_section == "required" else "required": bad_section,
+        }
+        schema["input_order"] = {valid_section: ["width", "height", "batch_size"]}
+        workflow = {"nodes": [_node(1, "EmptyLatentImage", widgets=[640, 480, 2])], "links": []}
+
+        result = convert_ui_to_api(workflow, object_info)
+
+        assert result["1"]["inputs"] == {"width": 640, "height": 480, "batch_size": 2}
 
     def test_single_bad_node_does_not_abort_conversion(self, object_info, caplog):
         # We can't easily induce _build_api_node to throw on real input, so
@@ -1211,6 +1354,53 @@ class TestWildcardInputType:
         assert "anything" not in result["1"]["inputs"]
 
 
+class TestMixedCaseLinkType:
+    """A socket type without a registered frontend widget is a connection,
+    whatever its letter case. ``VHS_LoadVideo.meta_batch`` (type
+    ``VHS_BatchManager``) sits before the ``format`` widget; giving it a
+    ``widgets_values`` slot shifted ``format="None"`` into ``meta_batch`` and
+    the node crashed on the worker (`'str' object has no attribute 'inputs'`,
+    117 failed cloud jobs in 30 days)."""
+
+    OI = {
+        "VHS_LoadVideo": {
+            "input": {
+                "required": {
+                    "video": [["clip.mp4"]],
+                    "select_every_nth": ["INT", {"default": 1}],
+                },
+                "optional": {
+                    "meta_batch": ["VHS_BatchManager"],
+                    "format": [["None", "AnimateDiff"], {"default": "AnimateDiff"}],
+                },
+            },
+            "input_order": {"required": ["video", "select_every_nth"], "optional": ["meta_batch", "format"]},
+            "output_node": True,
+            "output": ["IMAGE"],
+        },
+    }
+
+    def test_mixed_case_link_socket_owns_no_widget_slot(self):
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "VHS_LoadVideo",
+                    "mode": 0,
+                    "inputs": [{"name": "meta_batch", "type": "VHS_BatchManager", "link": None}],
+                    "outputs": [],
+                    "widgets_values": ["clip.mp4", 1, "None"],
+                }
+            ],
+            "links": [],
+        }
+
+        inputs = convert_ui_to_api(workflow, self.OI)["1"]["inputs"]
+
+        assert "meta_batch" not in inputs
+        assert inputs["format"] == "None"
+
+
 class TestImplicitSeedCompanion:
     """The frontend's ``useIntWidget`` composable adds a
     ``control_after_generate`` companion widget for inputs named ``seed`` or
@@ -1367,6 +1557,96 @@ class TestImplicitSeedCompanion:
         }
         result = convert_ui_to_api(workflow, self.OI)
         assert result["1"]["inputs"] == {"variation_seed": 7, "mode": "fixed", "strength": 0.5}
+
+
+class TestNonExactSeedLegacyCompanion:
+    """The frontend adds an implicit ``control_after_generate`` companion only
+    for an INT named exactly ``seed``/``noise_seed`` (``useIntWidget``), and the
+    cql engine reserves a slot on the same rule. After an unflagged
+    ``image_seed``/``texture_seed`` (or a dotted ``model.seed`` sub-input) there
+    is no companion, so a following ``"fixed"`` is normally the next widget's
+    real value. Older CLIs did write a stray marker after such seeds, so the
+    converter still drops one, but only when the next widget could not hold it.
+    """
+
+    @staticmethod
+    def _convert(schema_inputs: dict, widgets_values: list) -> dict:
+        object_info = {
+            "N": {
+                "input": {"required": schema_inputs},
+                "input_order": {"required": list(schema_inputs)},
+                "output_node": True,
+                "display_name": "N",
+            }
+        }
+        workflow = {
+            "nodes": [{"id": 1, "type": "N", "inputs": [], "outputs": [], "widgets_values": widgets_values, "mode": 0}],
+            "links": [],
+        }
+        return convert_ui_to_api(workflow, object_info)["1"]["inputs"]
+
+    def test_string_widget_value_fixed_after_image_seed_is_preserved(self):
+        inputs = self._convert(
+            {
+                "image_seed": ["INT", {"default": 0}],
+                "style": ["STRING", {}],
+                "steps": ["INT", {"default": 20}],
+            },
+            [5, "fixed", 30],
+        )
+        assert inputs == {"image_seed": 5, "style": "fixed", "steps": 30}
+
+    def test_legacy_stray_fixed_after_texture_seed_before_int_is_consumed(self):
+        inputs = self._convert(
+            {
+                "texture_seed": ["INT", {"default": 0}],
+                "steps": ["INT", {"default": 20}],
+            },
+            [5, "fixed", 30],
+        )
+        assert inputs == {"texture_seed": 5, "steps": 30}
+
+    def test_legacy_stray_fixed_after_texture_seed_before_float_is_consumed(self):
+        inputs = self._convert(
+            {
+                "texture_seed": ["INT", {"default": 0}],
+                "strength": ["FLOAT", {"default": 1.0}],
+            },
+            [5, "randomize", 0.5],
+        )
+        assert inputs == {"texture_seed": 5, "strength": 0.5}
+
+    def test_exact_seed_still_strips_before_string(self):
+        # The frontend really adds the companion after ``seed``, so the marker
+        # is dropped even though the next widget is a STRING.
+        inputs = self._convert(
+            {"seed": ["INT", {"default": 0}], "style": ["STRING", {}]},
+            [5, "fixed", "watercolor"],
+        )
+        assert inputs == {"seed": 5, "style": "watercolor"}
+
+    def test_exact_noise_seed_still_strips_before_string(self):
+        inputs = self._convert(
+            {"noise_seed": ["INT", {"default": 0}], "style": ["STRING", {}]},
+            [5, "increment", "watercolor"],
+        )
+        assert inputs == {"noise_seed": 5, "style": "watercolor"}
+
+    def test_dotted_sub_seed_does_not_eat_following_top_level_string(self):
+        # ``model.seed`` is the last sub-input; the widget after it is the
+        # top-level STRING, whose saved value happens to be "fixed".
+        inputs = self._convert(
+            {
+                "model": [
+                    "COMFY_DYNAMICCOMBO_V3",
+                    {"options": [{"key": "fast", "inputs": {"required": {"seed": ["INT", {"default": 0}]}}}]},
+                ],
+                "style": ["STRING", {}],
+                "steps": ["INT", {"default": 20}],
+            },
+            ["fast", 7, "fixed", 30],
+        )
+        assert inputs == {"model": "fast", "model.seed": 7, "style": "fixed", "steps": 30}
 
 
 class TestNodeNameForSAndRAlias:
@@ -2084,7 +2364,11 @@ class TestDynamicComboAfterControlMarker:
         with caplog.at_level(logging.WARNING):
             result = convert_ui_to_api(workflow, object_info)
         assert result["1"]["inputs"]["model"] == "renamed_server_side"
-        assert any("matched no option" in rec.message for rec in caplog.records)
+        matching = [rec for rec in caplog.records if "matched no option" in rec.message]
+        assert matching
+        # At ERROR, so the CLI's default LOG_LEVEL does not drop it; see
+        # ``test_graph_corruption_survives_the_cli_default_log_level``.
+        assert [rec.levelno for rec in matching] == [logging.ERROR]
 
     def test_deeply_nested_dynamic_combos_do_not_recurse_forever(self, caplog):
         # An unbounded chain of nested COMFY_*COMBO* sub-inputs
@@ -2128,7 +2412,74 @@ class TestDynamicComboAfterControlMarker:
         with caplog.at_level(logging.WARNING):
             result = convert_ui_to_api(workflow, object_info)  # must not raise
         assert "1" in result
-        assert any("exceeded depth" in rec.message for rec in caplog.records)
+        matching = [rec for rec in caplog.records if "exceeded depth" in rec.message]
+        assert matching
+        assert [rec.levelno for rec in matching] == [logging.ERROR]
+
+    def test_graph_corruption_survives_the_cli_default_log_level(self, monkeypatch):
+        """The two mismatch reports must reach a handler under the real CLI config.
+
+        ``caplog.at_level`` forces a floor, so the two tests above prove only
+        that the record is *created*. ``comfy_cli.logging.setup_logging`` — run
+        by ``cmdline`` at import on every real invocation — defaults LOG_LEVEL to
+        ERROR, so a WARNING record is dropped before any handler sees it and the
+        caller converts a misaligned graph with nothing printed. This asserts the
+        level the CLI actually runs at, not one the test chose.
+        """
+        import logging
+
+        from comfy_cli.logging import setup_logging
+
+        monkeypatch.delenv("LOG_LEVEL", raising=False)
+        root = logging.getLogger()
+        monkeypatch.setattr(root, "handlers", [])
+        setup_logging()
+        assert root.level == logging.ERROR, "guard: this test is about the ERROR default"
+
+        seen: list[logging.LogRecord] = []
+
+        class Collect(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                seen.append(record)
+
+        handler = Collect(level=root.level)
+        root.addHandler(handler)
+        try:
+            object_info = {
+                "StaleCombo": {
+                    "input": {
+                        "required": {
+                            "model": [
+                                "COMFY_DYNAMICCOMBO_V3",
+                                {"options": [{"key": "known", "inputs": {"required": {"x": ["FLOAT"]}}}]},
+                            ]
+                        }
+                    },
+                    "input_order": {"required": ["model"]},
+                    "output_node": True,
+                    "display_name": "SC",
+                }
+            }
+            workflow = {
+                "nodes": [
+                    {
+                        "id": 1,
+                        "type": "StaleCombo",
+                        "inputs": [],
+                        "outputs": [],
+                        "widgets_values": ["renamed_server_side", 1.5],
+                        "mode": 0,
+                    }
+                ],
+                "links": [],
+            }
+            convert_ui_to_api(workflow, object_info)
+        finally:
+            root.removeHandler(handler)
+
+        assert [rec.getMessage() for rec in seen if "matched no option" in rec.getMessage()], (
+            "the selector-skew report was dropped at the CLI's default log level"
+        )
 
 
 class TestSeedControlMarkerOffByOne:
@@ -2575,6 +2926,201 @@ class TestSubgraphExpansion:
         assert result["100:50"]["inputs"]["images"] == ["7", 0]
 
 
+class TestAbsentOptionalWidgetsAreNotSynthesized:
+    """An optional widget the SAVED NODE never carried is omitted, not defaulted.
+
+    ``graphToPrompt()`` serializes the widgets a node actually has, so a widget
+    the node did not carry is absent from its prompt. The evidence that it did
+    not carry one is the node's own ``inputs[]`` marker list, not the length of
+    ``widgets_values``: a truncated save whose later widgets ran past the end
+    still HAS those widgets, and the frontend sends their defaults.
+
+    Ground truth is the ``03_video_wan2_2_14B_i2v_subgraphed`` oracle fixture in
+    ``comfy-cloud-mcp-server``. Its ``CreateVideo`` saves
+    ``widgets_values: [16]`` AND ``inputs: [images, audio, fps{widget}]`` — one
+    widget-flagged entry naming ``fps`` — and the golden holds exactly
+    ``{"fps": 16, "images": [...]}`` while today's object_info also declares
+    optional ``bit_depth`` / ``color_space`` / ``codec``.
+    """
+
+    @staticmethod
+    def _convert(widget_values, required, optional, marker_names=None, all_markers_linked=False):
+        object_info = {
+            "N": {
+                "input": {"required": required, "optional": optional},
+                "input_order": {"required": list(required), "optional": list(optional)},
+            }
+        }
+        node = {"id": 1, "type": "N", "widgets_values": widget_values}
+        if marker_names is not None:
+            # An UNLINKED marker is what proves the save lists every widget and
+            # not just the converted ones; `all_markers_linked` builds the
+            # ambiguous converted-only shape instead.
+            node["inputs"] = [
+                {"name": n, "widget": {"name": n}, "link": 7 if all_markers_linked else None} for n in marker_names
+            ]
+        return convert_ui_to_api({"nodes": [node], "links": []}, object_info)["1"]["inputs"]
+
+    def test_a_converted_only_marker_list_is_not_an_inventory(self):
+        # Every marker is linked, so this could be an older frontend that wrote
+        # an entry only for a widget converted to a socket. An ordinary
+        # unmarked widget may therefore exist, and its default must stand.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps"],
+            all_markers_linked=True,
+        )
+        assert inputs["codec"] == "auto"
+
+    def test_an_optional_widget_the_markers_do_not_name_is_omitted(self):
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16}
+
+    def test_a_truncated_save_still_defaults_a_widget_the_node_had(self):
+        # The markers name `codec`, so the node HAS that widget and its value
+        # merely ran past the end of a truncated widgets_values. The frontend
+        # sends the default here, so dropping it would diverge.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps", "codec"],
+        )
+        assert inputs == {"fps": 16, "codec": "auto"}
+
+    def test_a_node_recording_no_markers_keeps_the_default(self):
+        # No evidence either way: an older frontend wrote an `inputs[]` entry
+        # only for a widget converted to a socket, so an empty marker set
+        # proves nothing. Behaviour is unchanged from before.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+        )
+        assert inputs == {"fps": 16, "codec": "auto"}
+
+    def test_an_absent_required_widget_still_takes_its_default(self):
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}], "quality": ["INT", {"default": 85}]},
+            {},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16, "quality": 85}
+
+    def test_an_optional_socketless_widget_is_never_dropped(self):
+        # The frontend submits a socketless widget from LIVE widget state even
+        # when it was never serialized, so its absence from the markers is not
+        # evidence that the node lacks it.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"swatch": ["COLOR", {"default": "#000000", "socketless": True}]},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16, "swatch": "#000000"}
+
+    def test_a_serialized_optional_widget_keeps_its_saved_value(self):
+        inputs = self._convert(
+            [16, "h264"],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps", "codec"],
+        )
+        assert inputs == {"fps": 16, "codec": "h264"}
+
+    def test_an_optional_non_widget_socket_keeps_its_default(self):
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"vae": ["VAE", {"default": None}]},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16, "vae": None}
+
+    def test_a_legacy_converted_but_unconnected_marker_is_not_an_inventory(self):
+        # Legacy ``convertToInput`` added the socket WITHOUT connecting it, so an
+        # unlinked marker is not by itself proof of the linked-inputs model: this
+        # node's only marker is a converted-and-unconnected ``cfg``, and ``steps``
+        # is an ordinary unmarked widget that the save positionally filled.
+        # Markers that omit a widget the save FILLED cannot be an inventory, so
+        # the optional ``denoise`` default must stand.
+        inputs = self._convert(
+            [None, 20],  # legacy hideWidget leaves the converted slot present but empty
+            {"cfg": ["FLOAT", {"default": 8.0}], "steps": ["INT", {"default": 20}]},
+            {"denoise": ["FLOAT", {"default": 1.0}]},
+            marker_names=["cfg"],
+        )
+        assert inputs == {"cfg": None, "steps": 20, "denoise": 1.0}
+
+    def test_an_inventory_naming_every_filled_widget_is_still_trusted(self):
+        # The same shape with complete markers: both filled widgets are named, so
+        # nothing contradicts the inventory and the unnamed optional is dropped.
+        inputs = self._convert(
+            [8.0, 20],
+            {"cfg": ["FLOAT", {"default": 8.0}], "steps": ["INT", {"default": 20}]},
+            {"denoise": ["FLOAT", {"default": 1.0}]},
+            marker_names=["cfg", "steps"],
+        )
+        assert inputs == {"cfg": 8.0, "steps": 20}
+
+    def test_an_unmarked_filled_input_that_is_not_a_widget_does_not_refuse(self):
+        # ``forceInput`` demotes a widget-type input to a connection-only slot, so
+        # it is not a declared widget and its absence from the markers says
+        # nothing about the inventory. The optional is still dropped.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}], "mask": ["INT", {"default": 1, "forceInput": True}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16, "mask": 1}
+
+    def test_a_dict_widget_marked_per_leaf_counts_as_naming_its_declared_input(self):
+        # A dict widget is DECLARED as ``regions`` but MARKED per leaf
+        # (``regions.face_oval``, ``regions.lips``, ...), so the inventory check
+        # compares against flattened names. Without that, every save carrying one
+        # would be refused and lose the fix on the rest of the node. Measured over
+        # the 500 oracle fixtures this is the only shape where the two differ.
+        schema = {
+            "input": {
+                "required": {"regions": ["COMFY_DYNAMICGROUP_V3", {}]},
+                "optional": {"codec": [["auto", "h264"], {"default": "auto"}]},
+            }
+        }
+        assert (
+            _markers_omit_a_filled_widget(
+                {"regions.face_oval", "regions.lips"}, schema, ["regions", "regions.face_oval"]
+            )
+            is False
+        )
+        # ...while a genuinely unnamed declared widget still refuses.
+        assert _markers_omit_a_filled_widget({"regions.face_oval"}, schema, ["codec"]) is True
+
+    def test_a_dict_widget_marked_per_leaf_keeps_its_declared_default(self):
+        # The same flattening on the other reader of the marker list. The save
+        # marks ``regions`` only per leaf (``regions.face_oval``) and its value
+        # ran past the end of a truncated ``widgets_values``, so the node HAS
+        # that widget and the frontend sends its default. Comparing the
+        # declared name against the raw marker strings reads the very marker
+        # that proves the input exists as proof that it does not, and drops the
+        # default.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"regions": ["STRING", {"default": "all"}]},
+            marker_names=["fps", "regions.face_oval"],
+        )
+        assert inputs == {"fps": 16, "regions": "all"}
+
+
 class TestSeedreamDynamicCombo:
     """Regression: a pristine ``COMFY_DYNAMICCOMBO_V3`` template must convert to
     valid API JSON.
@@ -2607,7 +3153,10 @@ class TestSeedreamDynamicCombo:
         assert inputs["seed"] == 0
         assert isinstance(inputs["seed"], int) and not isinstance(inputs["seed"], bool)
         assert inputs["watermark"] is False
-        # Optional input not in widgets_values is filled from its schema default.
+        # ``thinking`` is optional and this template records no ``inputs[]``
+        # widget markers, so nothing proves the node lacked the widget and the
+        # schema default still stands. See
+        # TestAbsentOptionalWidgetsAreNotSynthesized for the marker rule.
         assert inputs["thinking"] is True
 
         # The connection-only ``images`` sub-input must never become a widget,
@@ -2655,3 +3204,247 @@ class TestSeedreamDynamicCombo:
 
         assert "model.images" not in inputs
         assert "fixed" not in inputs.values()
+
+
+class TestLoad3DInjectedButtonSlots:
+    """The LOAD_3D custom widget injects three button slots before its own.
+
+    ``getCustomWidgets().LOAD_3D`` (frontend ``src/extensions/core/load3d.ts``)
+    adds ``upload 3d model`` / ``upload extra resources`` / ``clear`` button
+    widgets — serialized as the literal values ``"upload3dmodel"``,
+    ``"uploadExtraResources"``, ``"clear"`` — and only when the node already
+    carries a ``model_file`` widget, which is why ``Preview3DAdvanced`` and the
+    other ``model_3d``-fed viewers get none. They are constructed BEFORE the
+    LOAD_3D component widget, so they sit between ``model_file`` and the
+    declared DOM-widget input rather than trailing it. Walking the schema
+    positionally without them read the three button values into ``image``,
+    ``width`` and ``height``; the real captured shape is the one asserted here
+    (``api_hunyuan3d_model2uv.json`` and three sibling templates).
+    """
+
+    @pytest.fixture
+    def object_info_3d(self):
+        def load3d(dom_name):
+            return {
+                "input": {
+                    "required": {
+                        "model_file": ["COMBO", {"options": ["none"], "file_upload": True}],
+                        dom_name: ["LOAD_3D", {}],
+                        "width": ["INT", {"default": 1024}],
+                        "height": ["INT", {"default": 1024}],
+                    }
+                },
+                "input_order": {"required": ["model_file", dom_name, "width", "height"]},
+                "output": ["IMAGE"],
+                "output_name": ["image"],
+            }
+
+        return {
+            "Load3D": load3d("image"),
+            "Load3DAdvanced": load3d("viewport_state"),
+            # model_3d is a LINK input, so the frontend finds no model_file
+            # widget and injects no buttons: this node's LOAD_3D slot is the
+            # one right after nothing at all.
+            "Preview3DAdvanced": {
+                "input": {
+                    "required": {
+                        "model_3d": ["MESH"],
+                        "viewport_state": ["LOAD_3D", {}],
+                        "width": ["INT", {"default": 1024}],
+                    }
+                },
+                "input_order": {"required": ["model_3d", "viewport_state", "width"]},
+                "output": [],
+            },
+        }
+
+    def _workflow(self, node_type, widgets_values):
+        return {
+            "nodes": [
+                {
+                    "id": 13,
+                    "type": node_type,
+                    "inputs": [],
+                    "outputs": [],
+                    "mode": 0,
+                    "widgets_values": widgets_values,
+                }
+            ],
+            "links": [],
+        }
+
+    def test_load3d_button_values_do_not_become_input_values(self, object_info_3d):
+        # Verbatim from api_hunyuan3d_model2uv.json node 13.
+        ui = self._workflow("Load3D", ["toy.glb", "upload3dmodel", "uploadExtraResources", "clear", "", 1024, 1024])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "toy.glb", "image": "", "width": 1024, "height": 1024}
+
+    def test_advanced_variant_skips_the_same_three_slots(self, object_info_3d):
+        ui = self._workflow(
+            "Load3DAdvanced", ["motor.fbx", "upload3dmodel", "uploadExtraResources", "clear", "", 800, 600]
+        )
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 800, "height": 600}
+
+    def test_current_advanced_variant_maps_without_legacy_buttons(self, object_info_3d):
+        ui = self._workflow("Load3DAdvanced", ["motor.fbx", "", 800, 600])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 800, "height": 600}
+
+    def test_advanced_variant_single_marker_is_the_viewport_value(self, object_info_3d):
+        # Only two consecutive markers mark the legacy layout (the editor's
+        # rule). A lone marker is the viewport's value, so width/height stay put.
+        ui = self._workflow("Load3DAdvanced", ["m.fbx", "upload3dmodel", 800, 600])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "m.fbx", "viewport_state": "upload3dmodel", "width": 800, "height": 600}
+
+    def test_load3d_still_skips_a_single_marker_run(self, object_info_3d):
+        # Plain Load3D always carries its buttons, so the run-skip is unchanged.
+        ui = self._workflow("Load3D", ["toy.glb", "upload3dmodel", "", 800, 600])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "toy.glb", "image": "", "width": 800, "height": 600}
+
+    def test_truncated_legacy_advanced_variant_keeps_its_viewport_input(self, object_info_3d):
+        # A legacy save cut off after the button markers still describes a
+        # LOAD_3D slot; omitting viewport_state would leave a required input
+        # missing. The engine pads the same shape before a named edit.
+        ui = self._workflow("Load3DAdvanced", ["motor.fbx", "upload3dmodel", "uploadExtraResources"])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 1024, "height": 1024}
+
+    def test_link_fed_viewer_has_no_buttons_to_skip(self, object_info_3d):
+        # No model_file widget -> no injected buttons. Skipping three slots
+        # here would eat this node's only two values.
+        ui = self._workflow("Preview3DAdvanced", ["", 512])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"viewport_state": "", "width": 512}
+
+    def test_a_workflow_saved_without_the_buttons_still_maps_in_order(self, object_info_3d):
+        # The skip is gated on the literal button values, so a shape written
+        # before the extension existed (or by a non-frontend producer) keeps
+        # its straight positional mapping instead of losing three values.
+        ui = self._workflow("Load3D", ["toy.glb", "", 1024, 1024])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "toy.glb", "image": "", "width": 1024, "height": 1024}
+
+
+class TestSocketlessInputsOwnTheirSlot:
+    """``socketless: true`` hides the input SOCKET, not the widget.
+
+    ``litegraphService`` skips adding an input socket for such an input and
+    renders the widget as usual, so the value is serialized positionally like
+    any other — real templates prove it (``ColorToRGBInt ["#ffffff"]``,
+    ``Painter ["p.png", 1024, 1024, "#000000"]``). Reading the type as a link
+    left the slot unconsumed and the input was then refilled from the schema
+    default, so a colour the user picked came back as the default: a value the
+    server accepts and renders wrong.
+    """
+
+    @pytest.fixture
+    def object_info_socketless(self):
+        return {
+            "ImageCropToMask": {
+                "input": {
+                    "required": {
+                        "images": ["IMAGE"],
+                        "width": ["INT", {"default": 1024}],
+                        "background": ["COLOR", {"default": "#000000", "socketless": True}],
+                    }
+                },
+                "input_order": {"required": ["images", "width", "background"]},
+                "output": ["IMAGE"],
+            },
+            # socketless AND forceInput: the explicit demotion wins, so this
+            # one really is a link and owns no slot.
+            "CropByBBoxes": {
+                "input": {
+                    "required": {
+                        "images": ["IMAGE"],
+                        "width": ["INT", {"default": 64}],
+                        "bboxes": ["BOUNDING_BOX", {"socketless": True, "forceInput": True}],
+                    }
+                },
+                "input_order": {"required": ["images", "width", "bboxes"]},
+                "output": ["IMAGE"],
+            },
+        }
+
+    def _node(self, node_type, widgets_values):
+        return {
+            "nodes": [
+                {
+                    "id": 2,
+                    "type": node_type,
+                    "inputs": [{"name": "images", "link": None}],
+                    "outputs": [],
+                    "mode": 0,
+                    "widgets_values": widgets_values,
+                }
+            ],
+            "links": [],
+        }
+
+    def test_a_chosen_socketless_value_is_not_replaced_by_the_default(self, object_info_socketless):
+        ui = self._node("ImageCropToMask", [1024, "#ff0000"])
+        assert convert_ui_to_api(ui, object_info_socketless)["2"]["inputs"]["background"] == "#ff0000"
+
+    def test_force_input_still_demotes_a_socketless_input_to_a_link(self, object_info_socketless):
+        # Only one widget value, for `width`: if bboxes ate a slot the walk
+        # would be short one and width would go missing.
+        ui = self._node("CropByBBoxes", [64])
+        inputs = convert_ui_to_api(ui, object_info_socketless)["2"]["inputs"]
+        assert inputs["width"] == 64
+        assert "bboxes" not in inputs
+
+
+class TestSocketlessInputAbsentFromASavedWorkflow:
+    """A socketless widget the saved workflow never persisted still has to
+    reach the prompt.
+
+    The frontend builds the prompt from LIVE widget state, not from
+    `widgets_values`, so an ImageCompare saved as `widgets_values: []`
+    still submits a `compare_view`. Converting it without one produces a
+    prompt the server refuses outright — verified live:
+    `required_input_missing: compare_view`, and the key is accepted with any
+    value once present (null included). 40 of the 517 shipped templates end
+    in one of these.
+    """
+
+    @pytest.fixture
+    def object_info_compare(self):
+        return {
+            "ImageCompare": {
+                "input": {
+                    "required": {"compare_view": ["IMAGECOMPARE", {"socketless": True}]},
+                    "optional": {"image_a": ["IMAGE", {}]},
+                },
+                "input_order": {"required": ["compare_view"], "optional": ["image_a"]},
+                "output": [],
+                "output_node": True,
+            },
+            "ColorNode": {
+                "input": {"required": {"color": ["COLOR", {"socketless": True, "default": "#ffffff"}]}},
+                "input_order": {"required": ["color"]},
+                "output": ["INT"],
+            },
+        }
+
+    def _one(self, node_type, widgets_values, object_info):
+        ui = {
+            "nodes": [
+                {"id": 5, "type": node_type, "inputs": [], "outputs": [], "mode": 0, "widgets_values": widgets_values}
+            ],
+            "links": [],
+        }
+        return convert_ui_to_api(ui, object_info)["5"]["inputs"]
+
+    def test_a_socketless_input_with_no_declared_default_is_still_emitted(self, object_info_compare):
+        inputs = self._one("ImageCompare", [], object_info_compare)
+        assert "compare_view" in inputs
+        assert inputs["compare_view"] is None
+
+    def test_a_socketless_input_with_a_default_uses_it(self, object_info_compare):
+        assert self._one("ColorNode", [], object_info_compare)["color"] == "#ffffff"
+
+    def test_a_saved_value_still_wins_over_the_placeholder(self, object_info_compare):
+        assert self._one("ColorNode", ["#123456"], object_info_compare)["color"] == "#123456"

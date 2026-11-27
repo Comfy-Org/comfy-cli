@@ -3,7 +3,7 @@
 Scenario 1 — *"the agent edited the widget under layer 2, not on the surface;
 the value on the surface overwrites it and the user never sees it."* The
 frontend serializes a promoted widget's value on the HOST instance
-(ADR 0009); ``set-widget 57.width`` used to follow ``proxyWidgets`` into the
+(ADR-SUBGRAPH-PROMOTION-0009); ``set-widget 57.width`` used to follow ``proxyWidgets`` into the
 interior node, a value the frontend neither runs nor displays. The write must
 land on the host — and when an outside node feeds the promoted input
 (*"users even have number or text boxes connected to the promoted widget"*),
@@ -95,6 +95,7 @@ def test_promoted_address_writes_the_host_value(graph):
     assert "path" not in op
     assert op["promoted"]["value_index"] == 1
     assert op["promoted"]["host_widgets_values"] == expected
+    assert workflow_ops.apply_op(wf, op, graph) is wf
 
 
 def test_interior_address_of_a_promoted_widget_is_redirected_to_the_host(graph):
@@ -374,6 +375,75 @@ def test_nested_host_payload_reflects_the_forked_instance(graph):
     assert next(n for n in outer["nodes"] if n["id"] == 7)["widgets_values"] == []
 
 
+def test_replaying_a_promoted_write_to_a_deleted_nested_host_does_not_leak_a_fork(graph):
+    """A replica builds a ``set_widget`` op against nested host ``900/7`` while
+    node 7 still exists; a peer deletes node 7 first and then replays that op.
+    ``_apply_set_widget`` resolved ``instance_path`` with the engine's
+    MUTATING ``_resolve_node_path`` before checking the final segment existed
+    — which forks every non-terminal ancestor's shared definition (900's) en
+    route, unconditionally, and only THEN discovers the interior host is gone
+    and raises. ``apply_op``'s exception rollback does not undo a definition
+    fork, so the fork leaked: instance 900 permanently stopped sharing its
+    definition with sibling 901 over a write that never actually happened.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4670514882
+    """
+    wf = _load("image_z_image_turbo.json")
+    inner_sg = wf["definitions"]["subgraphs"][0]
+    outer_id = "0e0e0e0e-0000-4000-8000-000000000002"
+    outer = {
+        "id": outer_id,
+        "name": "Outer",
+        "inputs": [],
+        "outputs": [],
+        "widgets": [],
+        "links": [],
+        "nodes": [
+            {
+                "id": 7,
+                "type": inner_sg["id"],
+                "pos": [0, 0],
+                "size": [1, 1],
+                "flags": {},
+                "order": 0,
+                "mode": 0,
+                "inputs": [],
+                "outputs": [],
+                "properties": {},
+                "widgets_values": [],
+            }
+        ],
+    }
+    wf["definitions"]["subgraphs"].append(outer)
+    for nid in (900, 901):  # two instances share the outer definition
+        wf["nodes"].append(
+            {
+                "id": nid,
+                "type": outer_id,
+                "pos": [0, 0],
+                "size": [1, 1],
+                "flags": {},
+                "order": 0,
+                "mode": 0,
+                "inputs": [],
+                "outputs": [],
+                "properties": {},
+                "widgets_values": [],
+            }
+        )
+    # The op a replica minted while node 7 still existed.
+    _, op = workflow_ops.set_widget(copy.deepcopy(wf), graph, "900/7", "width", 640)
+
+    # This replica deletes node 7 before the op above arrives for replay.
+    outer["nodes"] = []
+    definitions_before = len(wf["definitions"]["subgraphs"])
+
+    wf = workflow_ops.apply_op(wf, op, graph)  # no-op: delete wins, and nothing is forked
+
+    assert _node(wf, 900)["type"] == outer_id  # not forked
+    assert _node(wf, 901)["type"] == outer_id  # sibling untouched
+    assert len(wf["definitions"]["subgraphs"]) == definitions_before  # no new fork left behind
+
+
 def test_connect_does_not_type_check_against_an_untyped_declared_input(graph):
     wf, prim = _with_primitive(graph)
     sg = next(d for d in wf["definitions"]["subgraphs"] if d["id"] == _node(wf, 57)["type"])
@@ -442,6 +512,51 @@ def test_legacy_primitive_write_carries_a_positional_payload(graph):
     assert op["promoted"] == {"value_index": 0, "instance_path": [str(legacy)], "host_widgets_values": [512, "fixed"]}
     replayed = workflow_ops.apply_op(copy.deepcopy(base), op, graph)
     assert _node(replayed, legacy)["widgets_values"] == [512, "fixed"]
+    assert workflow_ops.apply_op(wf, op, graph) is wf
+
+
+def test_legacy_primitive_write_mirrors_a_present_widgets_values_named(graph):
+    """jaeone94's review on #1106 (comment-6734369598): the op-replay path
+    (``_apply_positional_write``, which both of ``_apply_set_widget``'s
+    ``legacy_primitive``/``promoted``-non-subgraph branches call) wrote
+    ``widgets_values`` positionally but never touched a present
+    ``widgets_values_named``, leaving it stale. A legacy ``PrimitiveNode`` has
+    no catalog entry, so its register key is the frontend's fixed ``"value"``
+    name (``cql.promoted._PRIMITIVE_WIDGET_ORDER``), not something resolved
+    from a schema — the same name `_apply_one_slot_impl`'s direct-address
+    ``legacy_primitive`` branch (``comfy_cli/cql/engine.py``) must mirror
+    under too."""
+    wf = _load("image_z_image_turbo.json")
+    wf["last_node_id"] += 1
+    legacy = wf["last_node_id"]
+    wf["nodes"].append(
+        {
+            "id": legacy,
+            "type": "PrimitiveNode",
+            "pos": [0, 0],
+            "size": [210, 82],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "INT", "type": "INT", "widget": {"name": "width"}, "links": []}],
+            "properties": {"Run widget replace on values": False},
+            "widgets_values": [1024, "fixed"],
+            "widgets_values_named": {"value": 1024},
+        }
+    )
+    wf, _ = workflow_ops.connect(wf, graph, legacy, "INT", 57, "width")
+    base = copy.deepcopy(wf)
+    wf, op = workflow_ops.set_widget(wf, graph, 57, "width", 512)
+    assert op["legacy_primitive"] is True
+
+    primitive = _node(wf, legacy)
+    assert primitive["widgets_values"] == [512, "fixed"]
+    assert primitive["widgets_values_named"] == {"value": 512}
+
+    # Replay on a pre-write copy must mirror the register the same way.
+    replayed = workflow_ops.apply_op(copy.deepcopy(base), op, graph)
+    assert _node(replayed, legacy)["widgets_values_named"] == {"value": 512}
 
 
 def test_later_connect_to_a_materialized_promoted_input_stays_on_the_declared_register(graph):

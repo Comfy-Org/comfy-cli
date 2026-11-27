@@ -293,3 +293,27 @@ def test_omitting_base_image_writes_no_key_at_all(install: Path) -> None:
     # Then
     assert result.exit_code == 0, result.output
     assert "baseImage" not in _definition(install / "comfy-build.yaml")
+
+
+def test_init_without_a_comfy_version_carries_a_keyed_warning(install: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given: no flag, no version marker in the install, and no running ComfyUI to ask
+    monkeypatch.setattr(build, "detect_comfy_version_from_server", lambda base_url: None)
+
+    # When
+    result = _invoke(CliRunner(), ["--name", "Foo", "--python", sys.executable, str(install)])
+
+    # Then
+    assert result.exit_code == 0, result.output
+    data = _envelope(result)["data"]
+    assert data["base_comfy_version"] is None
+    assert [warning["code"] for warning in data["warnings"]] == ["build_comfy_version_missing"]
+    assert "comfy build update --comfy-version" in data["warnings"][0]["message"]
+
+
+def test_init_with_a_comfy_version_carries_no_warning(install: Path) -> None:
+    # When
+    result = _invoke(CliRunner(), _success_args(install))
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert _envelope(result)["data"]["warnings"] == []

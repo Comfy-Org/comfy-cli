@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from comfy_cli import knowledge
 from comfy_cli.caller import Caller
 from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
 from comfy_cli.skills import (
@@ -55,6 +56,7 @@ def test_bundles_expected_skills():
     assert "comfy-director" in names
     assert "comfy-build" in names
     assert "comfy-deploy" in names
+    assert "comfy-run-on-cloud" in names
 
 
 def test_bundled_skills_have_required_frontmatter():
@@ -187,6 +189,147 @@ def test_comfy_debug_skill_covers_common_error_codes():
     text = skill_content("comfy-debug")
     for code in ("server_not_running", "cloud_not_configured", "workflow_not_api_format", "prompt_rejected"):
         assert code in text, f"comfy-debug skill should mention {code}"
+
+
+def test_custom_node_skill_snapshot_keeps_runtime_contract():
+    """The product-loaded artifact is a router, not the authoring manual."""
+    router = skill_content("comfy-custom-nodes")
+    assert "knowledge authoring invocation" in router
+    assert "knowledge authoring troubleshooting" in router
+    assert "io.ComfyNode" not in router
+    # The router grows with the class count — it lists one command and one packaged
+    # fallback per retrieval class — so a flat byte cap goes stale and the next class
+    # gets paid for by squeezing the prose. Bound the fixed prose and the per-class
+    # cost separately instead. Tighter than a flat 2500 at the six classes this
+    # started with; it still has to stay far under `before_body // 3` below.
+    assert len(router.encode()) < 1300 + 160 * len(knowledge.AUTHORING_CLASSES)
+
+    corpus = "\n".join(skill_content(name) for name in reference_skill_names())
+    for needle in (
+        "V1 is legacy but supported",
+        "SEARCH_REQUIRED",
+        "SEARCH_OPTIONAL",
+        "SEARCH_AVOID",
+        "reference fidelity is unverified",
+        "Cloud-incompatible",
+        "filesystem presence is never proof",
+        "Do not promise hot reload",
+        "comfy node publish --token",
+        "WEB_DIRECTORY",
+        "node_replacement",
+        "Never put credentials in widget values",
+        "object_info_stale",
+        "never compares equal to itself",
+    ):
+        assert needle in corpus
+
+
+def test_custom_node_validation_names_what_to_refresh():
+    """A bare "restart ComfyUI and refresh" reads as "reload the browser tab"
+    or "run `comfy nodes refresh`"; neither re-reads `/object_info`."""
+    text = " ".join(skill_content("comfy-custom-nodes-validation").split())
+    assert not re.search(r"(?i)restart(ed)?,? (comfyui )?(and )?refresh\b", text)
+    assert not re.search(r"(?i)(refresh|reload)(ing)? (the |your )?(comfyui )?(browser|page|tab)\b", text)
+    assert "restart ComfyUI and re-run that command" in text
+    assert "`comfy nodes refresh` re-pulls annotations, not `/object_info`" in text
+    assert "browser reload changes neither" in text
+
+
+def test_custom_node_search_routes_have_positive_and_negative_controls():
+    """A search cue without an avoid control teaches indiscriminate search."""
+    text = skill_content("comfy-custom-nodes-search")
+    for route in ("SEARCH_REQUIRED", "SEARCH_OPTIONAL", "SEARCH_AVOID"):
+        assert route in text
+    assert "self-contained" in text
+    assert "untrusted" in text
+
+
+def test_custom_node_caching_fallback_states_the_silent_failure_mode():
+    """The two facts an author cannot read off their own node's source.
+
+    A signature that raises is swallowed into a NaN, so the symptom is endless
+    recomputation and never a crash — saying "crash" sends the author looking
+    for a traceback that is never emitted. And `rawLink` is the one input mode
+    where a linked input is not `None`, so a flat "every linked input is None"
+    is the wrong contract for it.
+    """
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "never compares equal to itself" in text
+    assert "recomputes every run" in text
+    assert not re.search(r"(?i)\bis (therefore )?a crash\b", text)
+    assert "rawLink" in text
+    assert "every ancestor's signature" in text
+
+
+def test_custom_node_caching_fallback_names_the_hiddens_that_are_not_populated():
+    """The signature pass is not an execution pass, so most hiddens are empty.
+
+    `IsChangedCache.get` calls `get_input_data(node["inputs"], class_def, node_id, None)`
+    with no `dynprompt` and no `extra_data`, so `PROMPT` is `{}` and `DYNPROMPT`,
+    `EXTRA_PNGINFO`, `EXECUTION_LIST` and the auth-token hiddens are `None`. Only
+    `UNIQUE_ID` is real. An author told "hidden inputs are real" fingerprints a
+    constant and ships the stale-output bug this slice exists to prevent.
+    """
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "UNIQUE_ID" in text
+    assert "`PROMPT` arrives as `{}`" in text
+    assert not re.search(r"(?i)hidden inputs are real", text)
+
+
+def test_custom_node_caching_fallback_qualifies_size_and_mtime_with_a_digest():
+    """Size plus mtime misses a same-size in-place rewrite; core hashes contents."""
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "content digest" in text
+    assert "LoadImage" in text
+
+
+def test_custom_node_caching_fallback_states_what_to_hashable_accepts():
+    """`to_hashable` takes scalars, Mapping and Sequence; anything else is a sentinel."""
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "unhashable sentinel" in text
+    assert not re.search(r"(?i)containers of those", text)
+
+
+def test_custom_node_initial_context_and_jit_budget_fixture():
+    """Measured fixture: unrelated turns pay only for the small router."""
+    fixture = json.loads((Path(__file__).parent / "fixtures/custom_node_context_budget.json").read_text())
+    router = skill_content("comfy-custom-nodes")
+    names = [name for name in reference_skill_names() if name.startswith("comfy-custom-nodes-")]
+    slices = [skill_content(name) for name in names]
+    before_body = fixture["initial_context"]["before"]["bytes"]
+    initial_bytes = len(router.encode())
+    assert initial_bytes == fixture["initial_context"]["after"]["bytes"]
+    assert len(router.split()) == fixture["initial_context"]["after"]["tokens"]
+    jit_bytes = [len(body.encode()) for body in slices]
+    fixture_order = (
+        "invocation",
+        "ecosystem-reference",
+        "api-schema",
+        "validation",
+        "dependencies-capabilities",
+        "troubleshooting",
+        "packaging-publishing",
+        "frontend-extension",
+        "v1-to-v3-migration",
+        "execution-caching",
+    )
+    assert sorted(jit_bytes) == sorted(fixture["jit_added"][key]["bytes"] for key in fixture_order)
+    assert initial_bytes < before_body // 3
+    assert max(jit_bytes) < before_body // 3
+    assert all(body not in router for body in slices)
+
+
+def test_loaded_custom_node_skill_routes_without_preloading_authoring_body(tmp_path: Path):
+    """Mutation-sensitive product path: inspect what a real default install writes."""
+    install(scope="project", project_root=tmp_path, targets=["claude-code"])
+    loaded = (tmp_path / ".claude/skills/comfy-custom-nodes/SKILL.md").read_text()
+    assert "knowledge authoring invocation" in loaded
+    assert "knowledge authoring validation" in loaded
+    assert "io.ComfyNode" not in loaded
+
+    mutated = loaded.replace("knowledge authoring invocation", "knowledge model invocation")
+    assert "knowledge authoring invocation" in loaded
+    assert "knowledge authoring invocation" not in mutated
 
 
 def test_comfy_skill_covers_cloud_setup_and_routing():
@@ -322,6 +465,64 @@ def test_comfy_deploy_skill_covers_the_deploy_group():
         assert needle in text, f"comfy-deploy skill should mention {needle}"
 
 
+def test_deploy_skills_describe_approved_uploads():
+    """`deploy run --allow-upload` is in the usage block an agent copies from,
+    and the failure table names the other cause of `deploy_asset_upload_failed`:
+    the private temporary copy of an approved file could not be made."""
+    usage = skill_content("comfy-deploy").split("## `comfy deploy run`", 1)[1].split("```", 2)[1]
+    assert "[--allow-upload <hash> ...]" in usage
+    row = next(
+        line
+        for line in skill_content("comfy-deploy-failures").splitlines()
+        if line.startswith("| `deploy_asset_upload_failed` |")
+    )
+    assert "temporary copy" in row
+    assert "details.temp_dir" in row
+
+
+def test_deploy_skills_say_when_a_refused_model_add_already_sent_the_file():
+    row = next(
+        line
+        for line in skill_content("comfy-deploy-failures").splitlines()
+        if line.startswith("| `deploy_models_unavailable` |")
+    )
+    assert "nothing was sent" not in row
+    assert "one upload link" in row
+    assert "`comfy assets library upload <file> --type <folder>`" in row
+    deploy = " ".join(skill_content("comfy-deploy").split())
+    assert "answers one upload link instead sends the whole file before the refusal" in deploy
+    assert "`comfy assets library upload <file> --type <folder>`" in deploy
+
+
+def test_deploy_skill_does_not_send_a_model_file_back_to_the_build():
+    back = skill_content("comfy-deploy").split("## Going back to the build", 1)[1].split("\n## ", 1)[0]
+    flat = " ".join(back.split())
+    assert "a pack, a model," not in flat
+    assert "`comfy deploy models add` puts one on a deployment, running or stopped, with no new release" in flat
+    assert "`deploy_models_unavailable`" in flat
+    assert "`deploy_conflict` whose `details.server_code` is `MODEL_POLICY`" in flat
+    assert "`deploy_conflict` for the release's model policy" not in flat
+    assert "a `modelPolicy` that lets it through" in flat
+    assert "Where the workspace has deployment updates on, `up` moves the deployment onto it" in flat
+
+
+def test_comfy_build_skill_stops_on_unresolved_classes_instead_of_authoring_nodes():
+    """`unresolvedClasses` names node classes nothing installable provides. The
+    skill is the only place that tells an agent what to do with them: stop
+    before changing the spec, list every disclosed class, report the `(+N more)`
+    count the advisory line truncates, and ask. Authoring node code into the
+    build to fill the gap would ship unreviewed code the user never chose; packs
+    the user already has are allowed. Every agent route into a Cloud build now reaches
+    this list only through the build's own output, so losing this text removes
+    the stop entirely."""
+    text = " ".join(skill_content("comfy-build").split())
+    assert "**`unresolvedClasses` is the list to take to the user.**" in text
+    assert "**Don't fill the gap by writing node code into the build.**" in text
+    assert "packs the user already has, published or local, are fine" in text
+    assert "Stop before you change the spec, list the classes, and ask the user how to go on" in text
+    assert "say how many more there are rather than presenting the eight as the whole list" in text
+
+
 def test_build_and_deploy_skills_hand_off_to_each_other():
     """Splitting one skill in two only works if each names the other.
 
@@ -332,6 +533,372 @@ def test_build_and_deploy_skills_hand_off_to_each_other():
     """
     assert "comfy-deploy" in skill_content("comfy-build"), "comfy-build should hand off to comfy-deploy"
     assert "comfy-build" in skill_content("comfy-deploy"), "comfy-deploy should point back at comfy-build"
+
+
+def test_run_on_cloud_skill_follows_the_check_route():
+    """The route starts at `workflow check --where cloud`, reads the workflow
+    from the running server, gates model uploads through `model upload`, and
+    ends at the `workflow save` link. `test_no_mentions_of_nonexistent_commands`
+    resolves each command against the live Typer tree."""
+    text = skill_content("comfy-run-on-cloud")
+    for needle in (
+        "comfy --json workflow check",
+        "--where cloud",
+        "--apply-remaps --out",
+        "--models-dir",
+        "comfy --json which",
+        "local_paths",
+        "comfy --json model upload",
+        "--expected-sha256",
+        "comfy --json workflow save",
+        "data.url",
+        "/api/userdata/workflows%2F",
+        "comfy-user",
+    ):
+        assert needle in text, f"comfy-run-on-cloud skill should mention {needle}"
+    for verdict in ("covered", "covered_with_remaps", "covered_needs_check", "needs_build"):
+        assert f"`{verdict}`" in text, f"comfy-run-on-cloud skill should handle the {verdict} verdict"
+
+
+def test_run_on_cloud_skill_runs_unproven_models_on_clouds_copy_and_names_them():
+    """Cloud's library models carry no content hash, so `covered_needs_check` is
+    the usual verdict for stock models: no model-choice question, and name each
+    unproven model in the report. A model proven different blocks instead."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "Use Cloud's copy; step 6 asks before a paid test run" in text
+    assert "ran on Cloud's copy unproven" in text
+    assert "`different_file`" in text
+    assert "Ask: use Cloud's copy" not in text
+
+
+def test_run_on_cloud_skill_requires_separate_consent_for_one_paid_job():
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "The Run on Cloud prompt does not authorize a paid job" in text
+    assert "including validation or preflight jobs" in text
+    assert "Approval for uploads, swaps, builds or deployments is not approval to run a job" in text
+    assert "A yes covers one job" in text
+    assert "Ask again before submitting another paid job" in text
+    assert "running it on Comfy Cloud (each run costs credits)" not in text
+
+
+def test_run_on_cloud_skill_saves_without_running_when_consent_is_declined_or_pending():
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "If they decline or have not answered, skip every job-submitting command in this step" in text
+    assert "including `deploy run --no-upload`" in text
+    assert "continue to step 7 to save the prepared workflow and return its link" in text
+    assert "Save the prepared editor-format file whether or not a test job ran" in text
+    assert '"Your custom build is ready."' in text
+    assert '"Your workflow is ready on Comfy Cloud."' in text
+    assert '"It hasn\'t been run yet."' in text
+    assert '"prepared, not run' not in text
+
+
+def test_run_on_cloud_skill_builds_from_the_whole_install():
+    """A custom build for a local workflow takes the whole install: the pack
+    versions installed and the models it holds, each with its folder and hash.
+    Building from the workflow alone (`--from-workflow`) picks the newest
+    version of each pack and starts with no models."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "--from-workflow" not in run
+    assert "Build from the whole install that serves `<server>`, by comfy-build's Path A" in run
+    build = " ".join(skill_content("comfy-build").split())
+    assert "carries only what that workflow loads" not in build
+    assert "a build it needs is made from the whole install (Path A)" in build
+
+
+def test_run_on_cloud_skill_gates_a_custom_build_on_one_plan_yes():
+    """Step 4's custom build is a short pointer to comfy-build Path A with one
+    yes to the plan before anything uploads, and the upload rule says that yes
+    covers the build's uploads."""
+    text = skill_content("comfy-run-on-cloud")
+    step = text[text.index("4. **A custom build.**") : text.index("| kind | what counts |")]
+    assert len(step.splitlines()) <= 10
+    step = " ".join(step.split())
+    assert "by comfy-build's Path A" in step
+    assert "show the plan and get one yes" in step
+    assert "`--min 0 --max 1` workers" in step
+    assert "Nothing uploads before that yes" in step
+    assert "A custom build's plan yes (step 4) covers its uploads" in " ".join(text.split())
+
+
+def test_run_on_cloud_skill_passes_the_server_to_init():
+    """`init` reads the ComfyUI version from a running server when the install
+    has no version marker (split and Desktop layouts), and defaults to port
+    8188. A server on another port must be passed, or the spec has no base
+    version and the release is refused after the yes."""
+    text = skill_content("comfy-run-on-cloud")
+    step = text[text.index("4. **A custom build.**") : text.index("| kind | what counts |")]
+    assert "pass `<server>` to `init` as `--comfy-url`" in " ".join(step.split())
+
+
+def test_run_on_cloud_skill_plan_is_comfy_builds_before_you_cut():
+    """The one yes covers comfy-build's whole "Before you cut" plan (every file
+    in a local pack uploads, Git packs with uncommitted edits, its own
+    questions), plus the GPU, region, cost and workers."""
+    text = skill_content("comfy-run-on-cloud")
+    step = " ".join(text[text.index("4. **A custom build.**") : text.index("| kind | what counts |")].split())
+    assert 'comfy-build\'s "Before you cut" plan' in step
+    assert "(count and total size)" not in step
+
+
+def test_build_skill_says_uncommitted_edits_in_a_git_pack_stay_behind():
+    """`init` records a Git-sourced pack's repository and HEAD commit and `push`
+    does not upload it, so the disclosure names each pack with uncommitted
+    changes and says those edits are not in the build."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "git -C '<install>/custom_nodes/<folder>' status --porcelain" in build
+    assert "Cloud builds the recorded commit, so name each Git pack with uncommitted changes" in build
+    assert "and say those edits will not be in the build" in build
+
+
+def test_build_skill_says_a_local_pack_uploads_its_whole_folder():
+    """`push` packages every ordinary file in a local pack's folder, so the
+    disclosure says config files and keys such as `.env` upload too."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "Every file in each local pack's folder uploads, config files and keys such as `.env` included" in build
+
+
+def test_build_skills_name_the_pins_the_builder_installs():
+    """An exact, unmarked `nvidia-vfx` pin and an HTTPS wheel line are installed
+    even when no node asks for them, so no skill says a pin never adds one."""
+    for name in ("comfy-build", "comfy-build-pins", "comfy-build-authoring", "comfy-build-failures"):
+        text = " ".join(skill_content(name).split())
+        for phrase in (
+            "A version pin forces a version, it never adds a package",
+            "a pin never adds a package",
+            "the builder applies every version pin as a pip **override**",
+            "The builder applies every version pin as a pip **override**",
+            "only forces the version of a package something else installs",
+        ):
+            assert phrase not in text, f"{name} should not say {phrase!r}"
+    for name in ("comfy-build-pins", "comfy-build-failures"):
+        text = " ".join(skill_content(name).split())
+        assert "nvidia-vfx==" in text, f"{name} should name the nvidia-vfx exception"
+        assert ".whl" in text, f"{name} should name the wheel exception"
+
+
+def test_build_pins_skill_keeps_a_needed_nvidia_vfx_pin():
+    """The builder installs an exact `nvidia-vfx` pin, so the delete rule for
+    `nvidia-*` exempts one a pack needs, as the keep rule says."""
+    text = " ".join(skill_content("comfy-build-pins").split())
+    assert "every `nvidia-*`, `comfyui-frontend-package`" not in text
+    assert "every `nvidia-*` except an `nvidia-vfx` pin a pack needs" in text
+
+
+def test_build_skill_searches_every_py_file_before_calling_a_folder_node_less():
+    """`init` lists every `custom_nodes/` folder as a pack, and the builder fails
+    the release on a side-loaded library that declares no nodes. A pack may build
+    `NODE_CLASS_MAPPINGS` or a V3 `comfy_entrypoint` in a submodule and re-export
+    it with a wildcard import, so `__init__.py` alone cannot tell: Path A
+    searches every `.py` file in the folder, and asks before dropping a folder
+    where neither name appears."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "`__init__.py` defines or imports" not in build
+    assert (
+        "A folder declares nodes when `NODE_CLASS_MAPPINGS` (the V1 node API) or `comfy_entrypoint` "
+        "(the V3 node API) appears in any `.py` file in it, subfolders included" in build
+    )
+    assert (
+        "grep -rlE --include='*.py' 'NODE_CLASS_MAPPINGS|comfy_entrypoint' '<install>/custom_nodes/<folder>'" in build
+    )
+    assert 'name it in the disclosure as "declares no nodes" and ask before dropping its `customNodes` entry' in build
+    assert "declared custom nodes failed to import" in build
+    # A kept pack may import a dropped library, which the build does not carry.
+    assert "with each kept pack that imports its library (grep the kept packs for the import)" in build
+    assert "the build does not carry that library" in build
+
+
+def test_build_skill_drops_disabled_pack_folders():
+    """ComfyUI skips a `custom_nodes/` folder whose name ends in `.disabled`, but
+    `init` lists it, so Path A drops that entry and names it."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "a folder whose name ends in `.disabled`**, which ComfyUI does not load" in build
+    assert "Drop that entry too, and name it in the disclosure" in build
+
+
+def test_build_skill_stops_on_a_disabled_pack_link_before_init():
+    """`init` follows a `custom_nodes/<name>.disabled` symlink, and packaging
+    refuses a symlinked local pack, so the scan stops before any spec exists.
+    The scanner owns that case: until it skips such a link, the agent names the
+    link and stops before `init`. It never moves or deletes the link, so no link
+    is left in a folder the person does not know about."""
+    build = " ".join(skill_content("comfy-build").split())
+    find = "find '<install>/custom_nodes' -maxdepth 1 -name '*.disabled' -type l"
+    assert f"Before `init`, list such links: `{find}`" in build
+    assert "`build_spec_invalid`, `node root must not be a symlink`" in build
+    assert "name each link to the person, say `init` fails on it, and stop" in build
+    assert "Never move or delete the link yourself: the person may move or delete it and ask again" in build
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    for text in (run, build):
+        assert "mktemp" not in text
+        assert "<park>" not in text
+        assert not re.findall(r"\bmv ", text)
+
+
+def test_build_skills_name_single_file_nodes_the_scan_skips():
+    """ComfyUI loads a single `.py` file under `custom_nodes/` as a pack, but
+    `init` scans folders only, so such a file never reaches the spec: the
+    disclosure names it as not carried."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "It skips a single `.py` file under `custom_nodes/`**, which ComfyUI loads as a pack" in build
+    assert "`init` scans folders only, so no such file reaches the spec" in build
+    assert "List the single `.py` files directly under `<install>/custom_nodes/`" in build
+
+
+def test_build_skill_stops_when_the_missing_node_comes_from_a_single_file():
+    """A single-file node cannot be carried, so a build for a workflow missing
+    that node on Cloud would fail on it: Path A stops before the plan."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "When the node the workflow is missing on Cloud comes from such a file, stop before the plan" in build
+
+
+def test_run_on_cloud_skill_keeps_the_prompts_server_for_local_commands():
+    """A server on another port than 8188 must be the one `--where local` reads."""
+    text = skill_content("comfy-run-on-cloud")
+    assert "COMFY_LOCAL_URL=<server> comfy --json run" in text
+    assert "--where local" in text
+
+
+def test_run_on_cloud_skill_judges_a_deployment_by_its_served_release():
+    """A Build's definition can change after its release was cut, so packs and
+    models both come from the served release's manifest."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "comfy --json build release manifest <release id>" in text
+    assert "`customNodes` and `models`" in text
+    assert "comfy --json build show --id" not in text
+
+
+def test_run_on_cloud_skill_holds_deployment_uploads_until_asked():
+    """`deploy run` uploads scanner-found files on its own, and with two asset
+    folders holding a `portrait.png` each it picks one by its own order. So the
+    skill asks about the scanner's own plan (`details.missing[]` from a
+    `--no-upload` run, by full path), and the retry may upload only the approved
+    hashes. A list the skill builds itself from the tracked workspace could name
+    one `portrait.png` while the run sends the other."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "--no-upload" in text
+    assert "deploy_asset_missing" in text
+    assert "`details.missing[]` is the exact upload plan" in text
+    assert "`local_path` (the full path it picked)" in text
+    assert "--allow-upload <hash>" in text
+    assert "never pass a hash nobody approved" in text
+    assert "It hashes a private copy of each file it uploads and sends that copy" in text
+    assert "data.assets.files[]" in text
+    # The old self-built list, from the tracked workspace only, is gone.
+    assert "jq -r '[.[].inputs" not in text
+    assert "Run without `--no-upload` only after" not in text
+
+
+def test_run_on_cloud_skill_asks_again_only_when_there_is_a_local_plan():
+    """`deploy_asset_missing` also covers a remote asset the account cannot
+    reach (`details.server_code` `missing_asset`, with no `details.missing[]`).
+    Asking again about local files is only for a refusal that lists them."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "`details.missing[]` is there: a file differs from the approved plan" in text
+    assert "`details.server_code` is `missing_asset`" in text
+    assert "Report that asset as unreachable" in text
+
+
+def test_run_on_cloud_skill_reads_the_save_warning_for_a_missing_link():
+    """An API-format file saved with sidebar saving on gets no link either; its
+    warning says so, so the skill does not blame the workspace setting."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "data.warnings[]" in text
+    assert "`api_format_saved_as_record`: sidebar saving is on" in text
+    assert "no warning: the workspace saves workflows as records only" in text
+
+
+def test_run_on_cloud_skill_handles_every_model_upload_outcome():
+    text = skill_content("comfy-run-on-cloud")
+    for needle in (
+        "already_present",
+        "model_upload_needs_confirm",
+        "asset_upload_wrong_workspace",
+        "asset_upload_unverified",
+        "asset_upload_invalid",
+        "file_changed",
+        "name_in_use",
+        "name_unverified",
+        "bad_expected_sha256",
+    ):
+        assert needle in text, f"comfy-run-on-cloud skill should handle {needle}"
+
+
+def test_run_on_cloud_skill_says_a_record_only_save_has_no_link():
+    """A record-only save adds nothing to the Workflows sidebar."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "records only" in text
+    assert "there is no link" in text
+    assert "then Workflows, then" not in text
+
+
+def test_run_on_cloud_skill_drops_the_later_milestone_links():
+    """Saved-file ids, `workflow ui` and `deploy ui` links are not part of this
+    route, and `build inventory --cloud` gave way to `workflow check`."""
+    text = skill_content("comfy-run-on-cloud")
+    for gone in ("saved_file_id", "workflow ui", "deploy ui", "build inventory"):
+        assert gone not in text, f"comfy-run-on-cloud skill should not mention {gone}"
+
+
+def test_run_on_cloud_skill_explains_workflow_and_folder_links():
+    """The save's link opens the one workflow or its folder; the skill hands
+    back `data.url` as it is and reads why a folder link was given."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    for needle in (
+        "Hand back `data.url` as returned",
+        "`data.url_opens`",
+        "workflowId=<data.workflow_id>",
+        "workflows=<folder>",
+        "`data.folder_link_reason`",
+        "`workflow_links_off`",
+        "`record_not_found`",
+        "`record_ambiguous`",
+        "`record_lookup_failed`",
+        "`workflow_record_unknown`",
+        "Cloud checks the link against the saved file when it opens",
+        "not listed here as `folder`",
+        "`data.filename`",
+    ):
+        assert needle in text, f"comfy-run-on-cloud skill should mention {needle}"
+    # The Cloud page is not part of this repository; the skill does not quote it.
+    assert "Couldn't open this workflow" not in text
+
+
+def test_comfy_skill_reads_an_unknown_link_value_as_folder():
+    text = " ".join(skill_content("comfy").split())
+    assert "`data.url_opens`" in text
+    assert "treat a value not listed here as `folder`" in text
+
+
+def test_run_on_cloud_skill_asks_before_every_upload_and_lossy_swap():
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "uploading any file from this machine" in text
+    assert "Ask by file name" in text
+    assert "A lossy swap**, asked first" in text
+
+
+def test_run_on_cloud_prompt_template_loads_the_skill():
+    """The prompt "Copy prompt" puts on the clipboard has to name a skill `show`
+    resolves, and carry the lines the skill reads."""
+    import comfy_cli.skills as skills_pkg
+
+    template = (Path(skills_pkg.__file__).parent / "comfy-run-on-cloud" / "PROMPT-TEMPLATE.md").read_text(
+        encoding="utf-8"
+    )
+    for line in (
+        "Run my ComfyUI workflow on Comfy Cloud.",
+        "If comfy is missing: uv tool install comfy-cli",
+        "Read the skill first: comfy skills show comfy-run-on-cloud",
+        "Workflow: workflows/<name>.json",
+        "ComfyUI: http://127.0.0.1:8188",
+        "ComfyUI user: <user>",
+    ):
+        assert line in template, f"prompt template should carry {line!r}"
+    assert "comfy-run-on-cloud" in readable_skill_names()
+
+
+def test_build_skill_points_a_single_workflow_at_run_on_cloud():
+    assert "comfy skills show comfy-run-on-cloud" in skill_content("comfy-build")
 
 
 def test_skill_content_rejects_unknown_name():
@@ -941,3 +1508,504 @@ def test_description_is_read_from_frontmatter_only():
         "Example config:\n\n```yaml\ndescription: an example, not this skill\n```\n"
     )
     assert frontmatter_description(with_example) == "The real one."
+
+
+# ---------------------------------------------------------------------------
+# Security: a path cannot take over a name the CLI ships
+# ---------------------------------------------------------------------------
+
+
+def _install_cli(monkeypatch, cwd: Path, *args: str):
+    """Run `comfy skills <args>` from `cwd` with the JSON renderer; return (result, last envelope)."""
+    monkeypatch.chdir(cwd)
+    _force_json_renderer()
+    try:
+        result = CliRunner().invoke(app, list(args))
+    finally:
+        reset_renderer_for_testing()
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    return result, json.loads(lines[-1]) if lines else None
+
+
+def _write_skill(path: Path, name: str, body: str = "Not the shipped skill.") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nname: {name}\ndescription: d.\n---\n{body}\n", encoding="utf-8")
+
+
+def _project(tmp_path: Path) -> Path:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "AGENTS.md").write_text("# mine\n", encoding="utf-8")
+    return root
+
+
+def _agent_files(root: Path) -> dict[str, str]:
+    return {
+        str(p.relative_to(root)): p.read_text(encoding="utf-8")
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and p.name != "skills-manifest.json"
+    }
+
+
+@pytest.mark.parametrize(
+    ("layout", "name"),
+    [
+        ("notcomfy/SKILL.md", "comfy"),  # a file in a folder of another name
+        ("comfy", "comfy"),  # a folder carrying the shipped name
+        ("pins/SKILL.md", "comfy-build-pins"),  # a reference skill's name
+        ("evil/SKILL.md", "Comfy"),  # one folder with `comfy` on macOS and Windows
+    ],
+)
+def test_install_refuses_a_path_declaring_a_shipped_name(monkeypatch, tmp_path: Path, layout: str, name: str):
+    root = _project(tmp_path)
+    token = tmp_path / "src" / layout
+    _write_skill(token / "SKILL.md" if not layout.endswith(".md") else token, name)
+    before = _agent_files(root)
+
+    result, envelope = _install_cli(monkeypatch, root, "install", "--scope", "project", "--skill", str(token))
+
+    assert result.exit_code == 1, result.output
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "skill_invalid"
+    assert repr(name) in envelope["error"]["message"]
+    assert "comfy skills show" in envelope["error"]["hint"]
+    assert _agent_files(root) == before
+
+
+def test_install_api_refuses_a_path_declaring_a_shipped_name(tmp_path: Path):
+    """The library entry point holds the same line as the command."""
+    md = tmp_path / "notcomfy" / "SKILL.md"
+    _write_skill(md, "comfy")
+    with pytest.raises(ValueError, match="'comfy'"):
+        install(scope="project", project_root=tmp_path, skills=[str(md)], targets=["claude-code"])
+    assert not (tmp_path / ".claude").exists()
+
+
+def test_validate_refuses_a_path_declaring_a_shipped_name(monkeypatch, tmp_path: Path):
+    md = tmp_path / "notcomfy" / "SKILL.md"
+    _write_skill(md, "comfy")
+    result, envelope = _install_cli(monkeypatch, tmp_path, "validate", str(md))
+    assert result.exit_code == 1, result.output
+    assert envelope["error"]["code"] == "skill_invalid"
+    assert "comfy skills show" in envelope["error"]["hint"]
+
+
+def test_install_accepts_the_shipped_reference_skill_by_its_installed_path(monkeypatch, tmp_path: Path):
+    import comfy_cli.skills as skills_pkg
+
+    root = _project(tmp_path)
+    shipped = Path(skills_pkg.__file__).parent / "comfy-build-pins"
+    result, envelope = _install_cli(
+        monkeypatch, root, "install", "--scope", "project", "--target", "claude-code", "--skill", str(shipped)
+    )
+    assert result.exit_code == 0, result.output
+    installed = root / ".claude" / "skills" / "comfy-build-pins" / "SKILL.md"
+    assert installed.read_text(encoding="utf-8") == skill_content("comfy-build-pins")
+    # ...and so does the copy that install just wrote, passed back by its own folder.
+    result, _ = _install_cli(
+        monkeypatch, root, "install", "--scope", "project", "--target", "cursor", "--skill", str(installed.parent)
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_install_accepts_an_unedited_copy_of_a_shipped_skill_with_crlf(monkeypatch, tmp_path: Path):
+    root = _project(tmp_path)
+    copy = tmp_path / "src" / "comfy" / "SKILL.md"
+    copy.parent.mkdir(parents=True)
+    copy.write_bytes(skill_content("comfy").replace("\n", "\r\n").encode("utf-8"))
+    result, _ = _install_cli(
+        monkeypatch, root, "install", "--scope", "project", "--target", "claude-code", "--skill", str(copy)
+    )
+    assert result.exit_code == 0, result.output
+    assert (root / ".claude" / "skills" / "comfy" / "SKILL.md").exists()
+
+
+def test_install_accepts_an_own_name_by_folder_and_by_file(monkeypatch, tmp_path: Path):
+    root = _project(tmp_path)
+    folder = tmp_path / "src" / "my-skill"
+    _write_skill(folder / "SKILL.md", "my-skill")
+    loose = tmp_path / "loose" / "SKILL.md"
+    _write_skill(loose, "my-other-skill")
+    for token in (folder, loose):
+        result, _ = _install_cli(
+            monkeypatch, root, "install", "--scope", "project", "--target", "claude-code", "--skill", str(token)
+        )
+        assert result.exit_code == 0, result.output
+    assert (root / ".claude" / "skills" / "my-skill" / "SKILL.md").exists()
+    assert (root / ".claude" / "skills" / "my-other-skill" / "SKILL.md").exists()
+
+
+def test_uninstall_by_path_still_removes_an_edited_shipped_skill(monkeypatch, tmp_path: Path):
+    root = _project(tmp_path)
+    install(scope="project", project_root=root, skills=["comfy"])
+    installed = root / ".claude" / "skills" / "comfy"
+    _write_skill(installed / "SKILL.md", "comfy", body="Edited by the user.")
+
+    result, _ = _install_cli(monkeypatch, root, "uninstall", "--scope", "project", "--skill", str(installed))
+
+    assert result.exit_code == 0, result.output
+    assert not (installed / "SKILL.md").exists()
+    assert not (root / ".cursor" / "rules" / "comfy.mdc").exists()
+    assert "comfy" not in (root / "AGENTS.md").read_text(encoding="utf-8").split("# mine", 1)[1]
+
+
+def test_agent_permissions_skill_names_every_permanently_refused_host():
+    """The skill tells the model not to request these, because `approve` vets
+    with `vet_host` and refuses them: a request for one waits until denied. A
+    host added to `_REFUSED_HOSTS` without a line here would be requested."""
+    from comfy_cli.agent import _REFUSED_HOSTS
+
+    rows = [
+        line
+        for line in skill_content("comfy-agent-permissions").splitlines()
+        if line.startswith("|") and "do **not** call `request_host`" in line
+    ]
+    assert len(rows) == 1, "expected exactly one 'never request this host' row in the blocked-by table"
+    for host in _REFUSED_HOSTS:
+        assert host in rows[0], f"the row should name the refused host {host}"
+
+
+def test_run_on_cloud_skill_fetches_files_with_any_name():
+    """A workflow or input whose name has a space, `#` or `&` still downloads
+    into a folder that exists: the query is URL-encoded, the working folder
+    name is made safe and created with its `inputs` folder, and paths are quoted."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert 'mkdir -p "<work>/inputs"' in text
+    assert "--data-urlencode 'filename=<file>'" in text
+    assert "--data-urlencode 'subfolder=<subfolder>'" in text
+    assert "inside double quotes the shell still runs `$(...)`" in text
+    assert '"filename=<file>"' not in text
+    assert '--name "<name>"' not in text
+    assert "a space as `%20`" in text
+    assert "run-on-cloud/<name>" not in text
+
+
+def test_run_on_cloud_skill_confirms_the_server_and_keeps_files_in_its_folder():
+    """Another program on the prompt's port answers every path with 200, so the
+    skill confirms ComfyUI before fetching; a model with no local copy is asked
+    about only when the server has it; a swap wires slots by name; and every
+    file it writes stays under `<work>`."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert '"<server>/api/system_stats"' in text
+    assert "`system.comfyui_version`" in text
+    assert '"<server>/api/models/<folder>"' in text
+    assert "Name slots in `connect`, never their numbers" in text
+    assert "lists a node's inputs and outputs by name" in text
+    assert "the server's answer proves nothing" in text
+    assert '> "<work>/preview.json"' in text
+    assert '--workflow "<work>/api.json"' in text
+    assert "> preview.json" not in text
+    assert "--workflow api.json" not in text
+
+
+def test_run_on_cloud_skill_asks_about_the_exact_input_and_partner_spend():
+    """The input is fetched and hashed before the ask, so the yes covers the
+    bytes that are uploaded; partner-API nodes spend credits beyond the run, so
+    `spend_consent_required` is asked about before `--allow-spend`."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "fetch it from the local server before you ask" in text
+    assert "shasum -a 256 '<work>/inputs/<subfolder>/<file>'" in text
+    assert "--create-dirs -o '<work>/inputs/<subfolder>/<file>'" in text
+    assert "Do not fetch it again" in text
+    assert "`spend_consent_required`" in text
+    assert "`--allow-spend`" in text
+
+
+def test_target_accepts_the_names_users_actually_type():
+    """`--target claude` and `--target AGENTS.md` are the same two targets as
+    `claude-code` and `agents-md`. Telemetry on released versions shows these
+    spellings arriving and being refused, which ends the install before anything
+    is written."""
+    from comfy_cli.skills.command import _kinds
+
+    assert _kinds(["claude"]) == ["claude-code"]
+    assert _kinds(["AGENTS.md"]) == ["agents-md"]
+    assert _kinds([" Cursor "]) == ["cursor"]
+    # The canonical spellings still mean exactly themselves.
+    assert _kinds(["claude-code", "cursor", "agents-md"]) == ["claude-code", "cursor", "agents-md"]
+
+
+def test_target_does_not_write_one_target_twice_for_two_spellings_of_it():
+    from comfy_cli.skills.command import _kinds
+
+    assert _kinds(["claude", "claude-code"]) == ["claude-code"]
+
+
+def test_a_tool_is_not_aliased_onto_a_file_it_does_not_read():
+    """`codex` and `aider` are the names people type most after `claude`, and
+    neither reads what `agents-md` writes at the default scope: Codex takes its
+    global instructions from ~/.codex/AGENTS.md, and Aider loads a conventions
+    file only when one is passed to it. Resolving them to `agents-md` would
+    report `wrote` and `Done` for an install the named agent never sees, so they
+    are refused with the reason and the thing to do instead."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds
+
+    for name, expected in (
+        ("codex", "~/.codex/AGENTS.md"),
+        ("aider", "--read"),
+        ("agents", "ambiguous"),
+    ):
+        with pytest.raises(typer.BadParameter) as refused:
+            _kinds([name.upper()])  # the refusal is case-insensitive too
+        text = str(refused.value)
+        assert f"no {name} target" in text, text
+        assert expected in text, text
+    # And the alias table does not quietly contain them.
+    from comfy_cli.skills.command import _TARGET_ALIASES
+
+    assert not {"codex", "aider", "agents"} & set(_TARGET_ALIASES)
+
+
+def test_unknown_target_says_which_mistake_it_looks_like():
+    """A swallowed flag, a path and an unknown name are three different user
+    errors; naming the choices answers only the third."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds
+
+    with pytest.raises(typer.BadParameter) as flag:
+        _kinds(["--help"])
+    assert "looks like another flag" in str(flag.value)
+
+    with pytest.raises(typer.BadParameter) as path:
+        _kinds(["/home/someone/.claude/skills/comfy-deploy/SKILL.md"])
+    assert "goes to --skill" in str(path.value)
+
+    with pytest.raises(typer.BadParameter) as unknown:
+        _kinds(["hermes"])
+    assert "unknown target" in str(unknown.value)
+    assert "agents-md" in str(unknown.value)
+
+
+def test_a_destination_path_is_pointed_at_its_own_target_name():
+    """`--target ~/.cursor/rules` names a destination this command already has a
+    target for, so saying "that is the cursor target" beats sending the user to
+    --skill for a second refusal."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds
+
+    for token, kind in (("~/.cursor/rules", "cursor"), ("./.claude", "claude-code"), ("./AGENTS.md", "agents-md")):
+        with pytest.raises(typer.BadParameter) as refused:
+            _kinds([token])
+        assert f"--target {kind}" in str(refused.value), str(refused.value)
+
+
+def test_option_values_are_classified_without_touching_the_filesystem(tmp_path, monkeypatch):
+    """The shape check must not probe the filesystem. An `exists()` call makes an
+    unknown name that happens to collide with a file in the working directory
+    read as a path, and it raises OSError -- ENAMETOOLONG on a long value -- out
+    of what should be a BadParameter."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds, _scope
+
+    (tmp_path / "hermes").write_text("not a target")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(typer.BadParameter) as collided:
+        _kinds(["hermes"])
+    assert "unknown target" in str(collided.value)
+
+    for value in ("x" * 4096, ""):
+        with pytest.raises(typer.BadParameter):
+            _kinds([value])
+        with pytest.raises(typer.BadParameter):
+            _scope(value)
+
+
+def test_scope_is_case_insensitive_and_names_the_mistake():
+    import typer
+
+    from comfy_cli.skills.command import _scope
+
+    assert _scope("User") == "user"
+    assert _scope(" project ") == "project"
+
+    with pytest.raises(typer.BadParameter) as flag:
+        _scope("--help")
+    assert "looks like another flag" in str(flag.value)
+
+    with pytest.raises(typer.BadParameter) as path:
+        _scope("/Users/someone/.agents")
+    assert "does not take a destination" in str(path.value)
+
+
+def test_no_refusal_message_names_a_command_that_may_be_the_wrong_one():
+    """`_kinds` is shared with `uninstall` and `_scope` with `uninstall` and
+    `status`, so a message that says `comfy skills install --help` points two
+    thirds of its readers at the wrong command."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds, _scope
+
+    messages = []
+    for call, value in ((_kinds, ["--help"]), (_kinds, ["nope"]), (_scope, "--help"), (_scope, "nope")):
+        with pytest.raises(typer.BadParameter) as refused:
+            call(value)
+        messages.append(str(refused.value))
+    assert not [m for m in messages if "skills install" in m], messages
+
+
+def test_install_help_names_the_three_targets():
+    """The option's help never said what the three targets were, so a user who
+    ran `--help` still had to guess."""
+    result = CliRunner().invoke(app, ["install", "--help"])
+    assert result.exit_code == 0
+    text = _ANSI_RE.sub("", result.output)
+    assert "claude-code" in text
+    assert "cursor" in text
+    assert "agents-md" in text
+
+
+def test_agents_md_install_says_who_still_has_to_be_pointed_at_the_file(tmp_path: Path, monkeypatch):
+    """Claude Code and Cursor find their own files. An AGENTS.md is read only by
+    the agents that look for one, and several have to be told where it is -- so
+    "Done" by itself reports success for an install the named agent never sees.
+    """
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["install", "--scope", "project", "--target", "agents-md"])
+    assert result.exit_code == 0, result.output
+    text = " ".join(_ANSI_RE.sub("", result.output).split())
+    assert "need pointing at" in text, text
+    assert "--read" in text, text
+    assert ".codex/AGENTS.md" in text, text
+
+
+def test_a_claude_code_install_is_not_told_to_go_point_an_agent_at_a_file(tmp_path: Path, monkeypatch):
+    """The pointing line belongs to the agents-md target only. Claude Code finds
+    ~/.claude/skills itself, and telling that user about Aider and Codex is noise
+    on the happy path."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["install", "--scope", "project", "--target", "claude-code"])
+    assert result.exit_code == 0, result.output
+    text = " ".join(_ANSI_RE.sub("", result.output).split())
+    assert "Done." in text, text
+    assert "need pointing at" not in text, text
+
+
+def test_the_command_does_not_promise_a_tool_it_only_half_serves():
+    """The help promised "Claude, Cursor, Aider, and any AGENTS.md-aware tool",
+    and that sentence is where this PR's first, wrong `aider` alias came from.
+    Aider reads a conventions file only when one is passed to it, so naming it
+    beside the two targets that work on their own is the claim that has to go."""
+    from comfy_cli.skills import command as skills_command
+
+    assert "Aider" not in (skills_command.app.info.help or "")
+    assert "Aider" not in (skills_command.__doc__ or "")
+    install_help = _ANSI_RE.sub("", CliRunner().invoke(app, ["install", "--help"]).output)
+    assert "Aider" not in install_help, install_help
+
+
+def test_deploy_skills_say_a_file_being_removed_while_added_is_added_again_only_once_it_is_gone():
+    row = next(
+        line
+        for line in skill_content("comfy-deploy-failures").splitlines()
+        if line.startswith("| `deploy_model_removed` |")
+    )
+    assert "`comfy deploy models ls <deployment>` no longer lists it" in row
+    deploy = " ".join(skill_content("comfy-deploy").split())
+    assert "`deploy_model_removed` (once `ls` no longer lists it, add it again)" in deploy
+
+
+# ---------------------------------------------------------------------------
+# The AGENTS.md follow-up notice is scope-dependent
+# ---------------------------------------------------------------------------
+
+
+def _install_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str) -> str:
+    """Run `skill install --target agents-md` at *scope* and flatten the panel.
+
+    Rich wraps the notice inside a bordered panel, so it is only a contiguous
+    string once borders, colour escapes and wrap points are collapsed.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(knowledge, "refresh_if_stale", lambda: None)
+    (tmp_path / "AGENTS.md").touch()
+    result = CliRunner().invoke(app, ["install", "--scope", scope, "--target", "agents-md"], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    return " ".join(_ANSI_RE.sub("", result.output).replace("│", " ").split())
+
+
+def test_install_notice_tells_a_project_scope_user_to_run_codex_here(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """At project scope the written AGENTS.md IS one Codex reads, from here."""
+    flattened = _install_notice(tmp_path, monkeypatch, "project")
+    assert "Codex when run from this directory" in flattened, flattened
+
+
+def test_install_notice_does_not_promise_codex_reads_a_user_scope_agents_md(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """At the default user scope the notice was advice that cannot work.
+
+    It said to run "Codex from inside this directory", but user scope writes
+    ``~/AGENTS.md`` and Codex reads a project AGENTS.md from the directory it
+    runs in and globally only ``~/.codex/AGENTS.md`` — so there is no directory
+    to run it from, and the install the notice called Done is one Codex never
+    sees. That is the same silent no-op ``_TARGET_NOT_AN_ALIAS`` refuses the
+    ``codex`` alias to prevent, arriving by the other door.
+    """
+    flattened = _install_notice(tmp_path, monkeypatch, "user")
+    assert "Codex not at all at --scope user" in flattened, flattened
+    assert "--scope project" in flattened, flattened
+    # The claim that cannot hold at user scope must be gone, not merely
+    # qualified further down.
+    assert "Codex when run from this directory" not in flattened, flattened
+
+
+def test_an_agents_md_this_command_does_not_write_is_not_hinted_at_agents_md():
+    """`--target ~/.codex/AGENTS.md` was answered with "pass --target agents-md".
+
+    That command writes `~/AGENTS.md` at the default scope, not the Codex file,
+    so following the hint produced a `Done` for a file Codex never reads -- the
+    same silent no-op `_TARGET_NOT_AN_ALIAS["codex"]` refuses the `codex` alias
+    to prevent, two screens away in the same module. An AGENTS.md inside a
+    tool's own dot-directory now says which files this command does write.
+    """
+    import typer
+
+    from comfy_cli.skills.command import _kinds
+
+    for token in ("~/.codex/AGENTS.md", "~/.config/AGENTS.md"):
+        with pytest.raises(typer.BadParameter) as refused:
+            _kinds([token])
+        message = str(refused.value)
+        assert "does not write" in message, message
+        assert "~/AGENTS.md at --scope user" in message, message
+        # The hint that sent them there is gone. The message may still NAME
+        # `--target agents-md` -- it has to, to say what that writes instead.
+        assert "pass `--target agents-md`" not in message, message
+        assert "that destination is the" not in message, message
+
+    # And an ordinary project or home AGENTS.md keeps the hint. `.` and `..` are
+    # paths, not dot-directories.
+    for token in ("./AGENTS.md", "../AGENTS.md", "~/AGENTS.md", "/home/someone/proj/AGENTS.md"):
+        with pytest.raises(typer.BadParameter) as refused:
+            _kinds([token])
+        assert "--target agents-md" in str(refused.value), str(refused.value)
+
+
+def test_a_skill_directory_gets_the_same_guidance_as_its_skill_md():
+    """A skill is a directory containing SKILL.md, and the loader takes either
+    form. The file form was excluded from the destination hints by its `.md`
+    suffix, but the directory form has none, so `~/.claude/skills/my-skill` came
+    back as "--target claude-code" -- a command that installs the bundled
+    defaults and not `my-skill`."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds
+
+    for token in ("~/.claude/skills/my-skill", "~/.claude/skills/my-skill/SKILL.md", "./.cursor/skills/x"):
+        with pytest.raises(typer.BadParameter) as refused:
+            _kinds([token])
+        assert "goes to --skill" in str(refused.value), str(refused.value)
+
+    # The destination directories themselves still resolve to their target.
+    for token, kind in (("~/.claude", "claude-code"), ("~/.cursor/rules", "cursor")):
+        with pytest.raises(typer.BadParameter) as refused:
+            _kinds([token])
+        assert f"--target {kind}" in str(refused.value), str(refused.value)

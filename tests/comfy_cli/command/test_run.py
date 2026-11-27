@@ -74,6 +74,25 @@ def mock_execution(workflow):
     )
 
 
+class _FakeClock:
+    """Independent wall/monotonic clocks for ``watch_execution``'s silence budget."""
+
+    START = 1000.0
+
+    def __init__(self):
+        self.wall = self.mono = self.START
+
+    def advance(self, seconds):
+        self.wall += seconds
+        self.mono += seconds
+
+    def patched(self):
+        fake_time = MagicMock()
+        fake_time.time.side_effect = lambda: self.wall
+        fake_time.monotonic.side_effect = lambda: self.mono
+        return patch("comfy_cli.command.run.execution.time", fake_time)
+
+
 def _make_msg(msg_type, prompt_id, **data_fields):
     return json.dumps({"type": msg_type, "data": {"prompt_id": prompt_id, **data_fields}})
 
@@ -252,6 +271,17 @@ class TestWorkflowExecutionAuth:
         body = json.loads(mock_open.call_args[0][0].data)
         assert body["extra_data"] == {"comfy_usage_source": "some-other-surface"}
 
+    def test_queue_sends_extra_pnginfo_in_the_body(self, workflow):
+        """The canvas graph handed in as ``extra_data`` reaches the ``/prompt``
+        body under ``extra_pnginfo.workflow``."""
+        canvas = {"nodes": [{"id": 1}], "links": []}
+        ex = self._make_exec(workflow, extra_data={"extra_pnginfo": {"workflow": canvas}})
+        with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
+            ex.queue()
+        body = json.loads(mock_open.call_args[0][0].data)
+        assert body["extra_data"]["extra_pnginfo"] == {"workflow": canvas}
+
     def test_queue_sends_usage_source_header(self, workflow):
         ex = self._make_exec(workflow)
         with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
@@ -315,6 +345,104 @@ class TestWatchExecution:
 
         mock_execution.watch_execution()
         assert len(mock_execution.remaining_nodes) == 0
+
+    def test_wall_clock_backstop_aborts_after_sleep(self, mock_execution):
+        """A dead connection whose socket timeout under-counted a system sleep
+        must still abort: once the WALL clock is past the silence budget, a
+        recv timeout re-raises instead of hanging."""
+        mock_execution.prompt_id = "p"
+        clock = _FakeClock()
+        mock_ws = MagicMock()
+
+        def recv():
+            # A ~999s sleep: the wall clock jumps, the monotonic one does not.
+            clock.wall += 999
+            raise WebSocketTimeoutException("timed out")
+
+        mock_ws.recv.side_effect = recv
+        mock_execution.ws = mock_ws
+
+        with clock.patched(), pytest.raises(WebSocketTimeoutException):
+            mock_execution.watch_execution()
+        assert mock_ws.recv.call_count == 1
+
+    def test_recv_timeout_within_budget_keeps_waiting(self, mock_execution):
+        """A poll-interval timeout BEFORE the wall-clock budget elapses must not
+        abort — the loop keeps waiting for the server."""
+        mock_execution.prompt_id = "p"
+        clock = _FakeClock()
+        mock_ws = MagicMock()
+        replies = iter(
+            [
+                WebSocketTimeoutException("poll tick"),  # 5s in — under the 30s budget
+                _make_msg("executing", "p", node=None),  # then the server finishes
+            ]
+        )
+
+        def recv():
+            clock.advance(5)
+            reply = next(replies)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        mock_ws.recv.side_effect = recv
+        mock_execution.ws = mock_ws
+
+        with clock.patched():
+            mock_execution.watch_execution()  # returns normally, no raise
+
+    def test_recv_poll_interval_is_capped(self, mock_execution):
+        """The per-recv socket timeout is capped so the loop regains control
+        regularly even when --timeout is large."""
+        mock_execution.timeout = 3600
+        mock_execution.prompt_id = "p"
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = [_make_msg("executing", "p", node=None)]
+        mock_execution.ws = mock_ws
+
+        mock_execution.watch_execution()
+        mock_ws.settimeout.assert_called_once_with(30)
+
+    def test_abort_lands_on_requested_deadline(self, mock_execution):
+        """A budget that is not a multiple of the poll interval must abort at
+        the requested deadline, not round up to the next poll boundary."""
+        mock_execution.timeout = 45
+        mock_execution.prompt_id = "p"
+        clock = _FakeClock()
+        mock_ws = MagicMock()
+
+        def recv():
+            # A silent server: each recv blocks for its full socket timeout.
+            clock.advance(mock_ws.settimeout.call_args.args[0])
+            raise WebSocketTimeoutException("timed out")
+
+        mock_ws.recv.side_effect = recv
+        mock_execution.ws = mock_ws
+
+        with clock.patched(), pytest.raises(WebSocketTimeoutException):
+            mock_execution.watch_execution()
+        assert [c.args[0] for c in mock_ws.settimeout.call_args_list] == [30, 15]
+        assert clock.mono == pytest.approx(_FakeClock.START + 45)
+
+    def test_backward_wall_clock_step_cannot_extend_wait(self, mock_execution):
+        """A wall clock stepped BACKWARD (an NTP correction) must not keep the
+        loop waiting past --timeout: the monotonic elapsed time still counts."""
+        mock_execution.prompt_id = "p"
+        clock = _FakeClock()
+        mock_ws = MagicMock()
+
+        def recv():
+            clock.mono += mock_ws.settimeout.call_args.args[0]
+            clock.wall -= 1000
+            raise WebSocketTimeoutException("timed out")
+
+        mock_ws.recv.side_effect = recv
+        mock_execution.ws = mock_ws
+
+        with clock.patched(), pytest.raises(WebSocketTimeoutException):
+            mock_execution.watch_execution()
+        assert mock_ws.recv.call_count == 1
 
     def test_skips_other_prompt_messages(self, mock_execution):
         prompt_id = "my-prompt"
@@ -435,6 +563,22 @@ class TestWatchExecution:
 
 
 class TestExecuteErrorHandling:
+    @pytest.fixture(autouse=True)
+    def local_preflight_catalog(self, monkeypatch):
+        """Keep execute() off a live server: an empty catalog skips preflight."""
+
+        def target_catalog(host, port):
+            assert (host, port) == ("127.0.0.1", 8188)
+            return {}
+
+        monkeypatch.setattr("comfy_cli.command.run._fetch_object_info", target_catalog)
+
+        def unexpected_catalog_request(*args, **kwargs):
+            pytest.fail("unexpected real catalog request; mock the specific object_info transport")
+
+        monkeypatch.setattr("comfy_cli.http._PLAIN_OPENER.open", unexpected_catalog_request)
+        monkeypatch.setattr("comfy_cli.cql.engine._load_from_target", unexpected_catalog_request)
+
     def _run_execute_expect_exit(self, workflow_file, **overrides):
         kwargs = dict(host="127.0.0.1", port=8188, wait=True, verbose=False, timeout=30)
         kwargs.update(overrides)
@@ -449,6 +593,7 @@ class TestExecuteErrorHandling:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.watch_execution.side_effect = WebSocketTimeoutException("timed out")
 
@@ -462,6 +607,7 @@ class TestExecuteErrorHandling:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.connect.side_effect = ConnectionError("Connection refused")
 
@@ -475,6 +621,7 @@ class TestExecuteErrorHandling:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.watch_execution.side_effect = WebSocketException("Connection lost")
 
@@ -490,6 +637,7 @@ class TestExecuteErrorHandling:
             mock_progress = MagicMock()
             MockProgress.return_value = mock_progress
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
 
@@ -510,6 +658,7 @@ class TestExecuteErrorHandling:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.watch_execution.side_effect = WebSocketTimeoutException("timed out")
 
@@ -580,6 +729,7 @@ class TestExecuteErrorHandling:
             mock_progress = MagicMock()
             MockProgress.return_value = mock_progress
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.watch_execution.side_effect = WebSocketTimeoutException("timed out")
 
@@ -606,8 +756,14 @@ class TestWaitStateFile:
 
     def _mock_exec(self, prompt_id):
         mock_exec = MagicMock()
+        mock_exec.borrowed_client_id = False
         mock_exec.prompt_id = prompt_id
         mock_exec.client_id = "cid-wait"
+        # Explicit, not the MagicMock default: an unconfigured attribute
+        # auto-vivifies as a truthy MagicMock(), which would make every test
+        # using this fixture look like a borrowed-client run to
+        # _reject_borrowed_wait.
+        mock_exec.borrowed_client_id = False
         mock_exec.outputs = []
         mock_exec.output_entries = []
         mock_exec.cached_node_ids = []
@@ -1350,7 +1506,8 @@ class TestResolvePartnerCredential:
         self._no_session(monkeypatch)
         assert _resolve_partner_credential() == ("auth_token_comfy_org", "forwarded-bearer")
 
-    def test_a_live_session_outranks_the_forwarded_bearer(self, monkeypatch: pytest.MonkeyPatch):
+    def test_the_forwarded_bearer_outranks_a_live_session(self, monkeypatch: pytest.MonkeyPatch):
+        """The token handed in for this run wins; the stored session is not even read."""
         monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", "forwarded-bearer")
         from comfy_cli.auth import store as auth_store
         from comfy_cli.cloud import oauth
@@ -1360,8 +1517,10 @@ class TestResolvePartnerCredential:
         session.access_token = "live-session"
         session.base_url = "https://cloud.comfy.org"
         monkeypatch.setattr(auth_store, "get", lambda _: None)
-        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: session)
-        assert _resolve_partner_credential() == ("auth_token_comfy_org", "live-session")
+        refreshed = []
+        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: refreshed.append(kw) or session)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "forwarded-bearer")
+        assert refreshed == []
 
     def test_the_forwarded_bearer_outranks_the_cloud_api_key(self, monkeypatch: pytest.MonkeyPatch):
         """Same order the `purpose="cloud"` chain uses: bearer, then env key."""
@@ -1623,6 +1782,7 @@ class TestExecutePartnerNodePreflight:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             # allow_spend=True: consent granted, so the spend gate is a no-op
@@ -1634,6 +1794,31 @@ class TestExecutePartnerNodePreflight:
             kwargs = MockExec.call_args.kwargs
             extra = kwargs.get("extra_data") or {}
             assert extra.get("api_key_comfy_org") == "test-key-abc"
+
+    @pytest.mark.parametrize(
+        ("host", "partner_node_token"),
+        [("127.0.0.1", True), ("localhost", True), ("[::1]", True), ("10.0.0.5", False), ("gpu-box.lan", False)],
+    )
+    def test_only_a_loopback_comfyui_gets_a_partner_node_token(self, tmp_path, host, partner_node_token):
+        wf_file = self._wf_file(tmp_path)
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.OBJECT_INFO),
+            patch(
+                "comfy_cli.command.run._resolve_partner_credential",
+                return_value=("auth_token_comfy_org", "partner-node-token"),
+            ) as MockCred,
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+            execute(wf_file, host=host, port=8188, wait=True, timeout=30, allow_spend=True)
+
+        MockCred.assert_called_once_with(partner_node_token=partner_node_token)
+        assert MockExec.call_args.kwargs["extra_data"] == {"auth_token_comfy_org": "partner-node-token"}
 
     def test_non_partner_workflow_skips_preflight(self, workflow_file, monkeypatch):
         """The preflight must not gate ordinary workflows. ``_fetch_object_info``
@@ -1652,6 +1837,7 @@ class TestExecutePartnerNodePreflight:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
@@ -1710,6 +1896,7 @@ class TestPartnerNodesDetectedTelemetry:
             patch("comfy_cli.tracking.track_event") as mock_track,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, api_key="k", allow_spend=True)
@@ -1738,6 +1925,7 @@ class TestPartnerNodesDetectedTelemetry:
             patch("comfy_cli.tracking.track_event") as mock_track,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, allow_spend=True)
@@ -1762,6 +1950,7 @@ class TestPartnerNodesDetectedTelemetry:
             patch("comfy_cli.tracking.track_event") as mock_track,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
@@ -2071,6 +2260,7 @@ class TestExecuteSpendGate:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             # A stored api_key means the missing-credential path is satisfied,
@@ -2096,6 +2286,7 @@ class TestExecuteSpendGate:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
@@ -2145,6 +2336,7 @@ class TestExecuteSpendGate:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, api_key="k")
@@ -2223,14 +2415,33 @@ class TestSpendGateStdinAndMarkup:
 
 
 class TestExecuteUiWorkflow:
+    @pytest.fixture(autouse=True)
+    def local_preflight_catalog(self, monkeypatch):
+        """Validate against the complete conversion fixture without a live server."""
+        from copy import deepcopy
+
+        def target_catalog(host, port):
+            assert (host, port) == ("127.0.0.1", 8188)
+            return deepcopy(self.OBJECT_INFO)
+
+        monkeypatch.setattr("comfy_cli.command.run._fetch_object_info", target_catalog)
+
+        def unexpected_catalog_request(*args, **kwargs):
+            pytest.fail("unexpected real catalog request; mock the specific object_info transport")
+
+        monkeypatch.setattr("comfy_cli.http._PLAIN_OPENER.open", unexpected_catalog_request)
+        monkeypatch.setattr("comfy_cli.cql.engine._load_from_target", unexpected_catalog_request)
+
+    # The conversion success fixture must also be an executable graph:
+    # PreviewImage consumes IMAGE, not an EmptyLatentImage's LATENT output.
     UI = {
         "nodes": [
             {
                 "id": 1,
-                "type": "EmptyLatentImage",
+                "type": "EmptyImage",
                 "inputs": [],
-                "outputs": [{"name": "LATENT", "type": "LATENT", "links": [10]}],
-                "widgets_values": [512, 512, 1],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [10]}],
+                "widgets_values": [512, 512, 1, 0],
                 "mode": 0,
             },
             {
@@ -2244,19 +2455,20 @@ class TestExecuteUiWorkflow:
         "links": [[10, 1, 0, 2, 0, "IMAGE"]],
     }
     OBJECT_INFO = {
-        "EmptyLatentImage": {
+        "EmptyImage": {
             "input": {
                 "required": {
                     "width": ["INT", {"default": 512}],
                     "height": ["INT", {"default": 512}],
                     "batch_size": ["INT", {"default": 1}],
+                    "color": ["INT", {"default": 0}],
                 }
             },
-            "input_order": {"required": ["width", "height", "batch_size"]},
-            "output": ["LATENT"],
-            "output_name": ["LATENT"],
+            "input_order": {"required": ["width", "height", "batch_size", "color"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
             "output_node": False,
-            "display_name": "Empty Latent Image",
+            "display_name": "Empty Image",
         },
         "PreviewImage": {
             "input": {"required": {"images": ["IMAGE"]}},
@@ -2285,6 +2497,7 @@ class TestExecuteUiWorkflow:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
 
@@ -2294,7 +2507,7 @@ class TestExecuteUiWorkflow:
             assert mock_fetch.call_args.args == ("127.0.0.1", 8188, 30)
             api_workflow = MockExec.call_args.args[0]
             assert set(api_workflow) == {"1", "2"}
-            assert api_workflow["1"]["class_type"] == "EmptyLatentImage"
+            assert api_workflow["1"]["class_type"] == "EmptyImage"
             assert api_workflow["2"]["inputs"]["images"] == ["1", 0]
             mock_exec.queue.assert_called_once()
 
@@ -2334,6 +2547,7 @@ class TestExecuteUiWorkflow:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
 
@@ -2342,6 +2556,49 @@ class TestExecuteUiWorkflow:
             mock_fetch.assert_called_once()
             assert mock_fetch.call_args.args == ("127.0.0.1", 8188, 30)
             assert MockExec.call_args.kwargs["extra_data"]["api_key_comfy_org"] == "sk-test"
+
+    def test_ui_workflow_run_carries_the_canvas_graph_as_extra_pnginfo(self, ui_workflow_file):
+        """The editor's Queue button sends the canvas graph as
+        ``extra_data.extra_pnginfo.workflow``; save nodes write it into the
+        output file, which is what lets the file drag back as a workflow. A UI
+        run from the CLI (how the Comfy agent submits) must send the same."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+
+            execute(ui_workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30, api_key="sk-test")
+
+            extra = MockExec.call_args.kwargs["extra_data"]
+            assert extra["extra_pnginfo"] == {"workflow": self.UI}
+            # The explicit key still rides alongside it.
+            assert extra["api_key_comfy_org"] == "sk-test"
+
+    def test_api_workflow_run_sends_no_extra_pnginfo(self, tmp_path):
+        """An API-format input has no canvas graph to send."""
+        path = tmp_path / "api.json"
+        path.write_text(json.dumps({"1": {"class_type": "PreviewImage", "inputs": {}}}))
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run._preflight_validate"),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+
+            execute(str(path), host="127.0.0.1", port=8188, wait=True, timeout=30)
+
+            assert "extra_pnginfo" not in (MockExec.call_args.kwargs["extra_data"] or {})
 
     def test_ui_workflow_exits_when_conversion_yields_nothing(self):
         # All nodes are UI-only (Note/PrimitiveNode/Reroute/GetNode/SetNode) and
@@ -2493,6 +2750,28 @@ class TestExecuteCloudAutoConvert:
         # The CONVERTED workflow was passed to the submit call — not the raw UI form.
         submitted_args, _ = mock_client.submit_prompt.call_args
         assert submitted_args[0] == self.CONVERTED
+
+    def test_ui_workflow_submit_carries_the_canvas_graph_as_extra_pnginfo(self, ui_workflow_file, fake_target):
+        """Cloud path: the API graph is what runs, and the UI graph it
+        came from rides ``extra_data.extra_pnginfo.workflow`` like an editor run."""
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+
+        mock_client = MagicMock()
+        mock_client.submit_prompt.return_value = SubmitResult(prompt_id="prompt-png", number=1, node_errors={})
+
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.command.run.convert_ui_to_api", return_value=self.CONVERTED),
+            patch("comfy_cli.cql.engine._load_from_target", return_value={"KSampler": {"output_node": True}}),
+            patch("comfy_cli.comfy_client.Client", return_value=mock_client),
+            patch("comfy_cli.command.run._spawn_watcher"),
+        ):
+            execute_cloud(ui_workflow_file, wait=False)
+
+        submitted_args, submitted_kwargs = mock_client.submit_prompt.call_args
+        assert submitted_args[0] == self.CONVERTED
+        assert submitted_kwargs["extra_data"] == {"extra_pnginfo": {"workflow": self.UI_WORKFLOW}}
 
     def test_ui_workflow_conversion_honors_object_info_file_env(
         self, ui_workflow_file, fake_target, tmp_path, monkeypatch
@@ -2776,6 +3055,130 @@ class TestExecuteCloudWait:
         # The poll budget was actually spent before giving up.
         assert client.get_history.call_count == comfy_client._MAX_POLL_FAILURES
 
+    def _run_wait_on_job_statuses(self, workflow_file, fake_target, statuses, histories=(None,)):
+        """Run --wait with a real wait loop over faked /jobs/<id> and history sequences.
+
+        By default history never reports done, which is what cloud does for a
+        job that fails before it executes. The last status and the last history
+        record repeat for any later poll. Returns (exit code, client); a run
+        that returns normally exits 0.
+        """
+        import itertools
+
+        import typer
+
+        from comfy_cli import comfy_client
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        client = comfy_client.Client(fake_target)
+        client.submit_prompt = MagicMock(return_value=SubmitResult(prompt_id="prompt-ended", number=1, node_errors={}))
+        client.get_history = MagicMock(side_effect=itertools.chain(histories, itertools.repeat(histories[-1])))
+        client.get_job_status = MagicMock(side_effect=itertools.chain(statuses, itertools.repeat(statuses[-1])))
+
+        # Each poll's sleep advances a fake clock, so a wait that misses the
+        # terminal status reaches its silence deadline (cloud_timeout) quickly.
+        clock = [1_000_000.0]
+
+        def _sleep(seconds):
+            clock[0] += seconds
+
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="run"))
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.cql.engine._load_from_target", return_value={}),
+            patch("comfy_cli.comfy_client.Client", return_value=client),
+            patch("comfy_cli.comfy_client.time.sleep", side_effect=_sleep),
+            patch("comfy_cli.comfy_client.time.time", side_effect=lambda: clock[0]),
+        ):
+            try:
+                execute_cloud(workflow_file, wait=True, timeout=600)
+            except typer.Exit as e:
+                return e.exit_code, client
+        return 0, client
+
+    def test_wait_ends_on_failed_job_status_with_its_error(self, api_workflow_file, fake_target, capsys):
+        """A job the jobs endpoint reports failed ends the wait at once with
+        the job's error, instead of waiting out --timeout to cloud_timeout."""
+        from comfy_cli import jobs_state
+
+        failed = {
+            "id": "prompt-ended",
+            "status": "failed",
+            "execution_error": {
+                "node_id": "10",
+                "node_type": "LoadImage",
+                "exception_type": "ImageDownloadError",
+                "exception_message": "Failed to download image missing.png",
+                "traceback": ["frame 1", "frame 2", "frame 3"],
+                "current_inputs": {"image": "missing.png"},
+            },
+        }
+        exit_code, client = self._run_wait_on_job_statuses(
+            api_workflow_file, fake_target, [{"id": "prompt-ended", "status": "pending"}, failed]
+        )
+
+        assert exit_code == 1
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "execution_error"
+        assert envelope["error"]["message"] == "LoadImage (node 10): Failed to download image missing.png"
+        details = envelope["error"]["details"]
+        assert details["prompt_id"] == "prompt-ended"
+        assert details["exception_type"] == "ImageDownloadError"
+        assert details["node_id"] == "10"
+        assert "current_inputs" not in details
+        # Ended on the second poll, not after 600s of silence.
+        assert client.get_job_status.call_count == 2
+        state = jobs_state.read("prompt-ended")
+        assert state.status == "error"
+        assert state.error["code"] == "execution_error"
+
+    def test_wait_on_completed_job_status_waits_for_the_done_history(self, api_workflow_file, fake_target, capsys):
+        """`/jobs/<id>` can say completed while the history fetched in the same
+        poll is still a running record. The wait must not end on that record:
+        it would report success without the outputs."""
+        from comfy_cli import jobs_state
+
+        running = {"status": {"status_str": "running", "completed": False}, "outputs": {}}
+        exit_code, client = self._run_wait_on_job_statuses(
+            api_workflow_file,
+            fake_target,
+            [{"id": "prompt-ended", "status": "completed"}],
+            histories=[running, running, self.RECORD],
+        )
+
+        assert exit_code == 0
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is True
+        assert envelope["data"]["outputs_by_node"] == {
+            "9": ["https://cloud.example.com/api/view?filename=a.png&subfolder=&type=output"],
+            "12": ["https://cloud.example.com/api/view?filename=v.mp4&subfolder=&type=output"],
+        }
+        assert client.get_history.call_count == 3
+        assert jobs_state.read("prompt-ended").record == self.RECORD
+
+    def test_wait_ends_on_cancelled_job_status(self, api_workflow_file, fake_target, capsys):
+        from comfy_cli import jobs_state
+
+        exit_code, client = self._run_wait_on_job_statuses(
+            api_workflow_file,
+            fake_target,
+            [{"id": "prompt-ended", "status": "in_progress"}, {"id": "prompt-ended", "status": "cancelled"}],
+        )
+
+        assert exit_code == 130
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "cancelled"
+        assert client.get_job_status.call_count == 2
+        assert jobs_state.read("prompt-ended").status == "cancelled"
+
     def test_wait_envelope_data_validates_against_run_schema(self, api_workflow_file, fake_target, capsys):
         from pathlib import Path
 
@@ -2970,6 +3373,7 @@ class TestRunStripsComposeMeta:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(str(path), host="127.0.0.1", port=8188, wait=True, timeout=30)
@@ -3008,13 +3412,14 @@ class TestLocalExecuteItemMapAndGroupedOutputs:
 
     def _mock_exec(self, prompt_id):
         mock_exec = MagicMock()
+        mock_exec.borrowed_client_id = False
         mock_exec.prompt_id = prompt_id
         mock_exec.client_id = "cid-local"
         mock_exec.outputs = []
         mock_exec.output_entries = []
         mock_exec.cached_node_ids = []
         mock_exec.executed_node_ids = []
-        # `_emit_queued` hands these to `json.dumps` in NDJSON mode. Unstubbed
+        # `_emit_queued_event` hands these to `json.dumps` in NDJSON mode. Unstubbed
         # MagicMocks make its `default` hook recurse forever on `isoformat`,
         # retaining every child mock — ~28GB, and the OOM killed the suite.
         mock_exec.validation_warnings = []
@@ -3173,6 +3578,7 @@ class TestRunJournal:
     def test_local_submit_journals_inside_project(self, proj_dir):
         workflow_file = self._workflow_file(proj_dir)
         mock_exec = MagicMock()
+        mock_exec.borrowed_client_id = False
         mock_exec.prompt_id = "prompt-local-journal"
         mock_exec.client_id = "cid"
         mock_exec.outputs = []

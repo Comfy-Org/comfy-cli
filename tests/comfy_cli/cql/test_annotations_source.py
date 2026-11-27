@@ -300,8 +300,23 @@ def test_interleaved_refreshes_cannot_mix_generations(cache_dir, monkeypatch):
     whole = [{src._SUPPORTED_NODES: sup, src._CLOUD_DISABLE: dis} for sup, dis in gens.values()]
 
     # Seed so readers always find something, then hammer it from both sides.
+    #
+    # The sampling window is bounded by the sample COUNT, not by wall clock. A
+    # fixed `time.sleep` makes `len(observed)` a measurement of the machine's
+    # loop throughput, and the "did we sample enough to prove anything" guard
+    # below then fails on a slow machine while the invariant it guards holds.
+    # CI runs the suite under `pytest --cov`, whose line tracer roughly halves
+    # the rate, on a shared runner; measured locally, a 0.4s window yields
+    # ~300-390 samples plain, ~165 under `--cov`, and 29-48 under `--cov` plus
+    # 3x CPU oversubscription — i.e. below any fixed bar worth setting. Waiting
+    # for a target count instead makes the evidence a guarantee on every
+    # machine and lets the window stretch on a slow one.
+    SAMPLE_TARGET = 200
+    SAMPLE_DEADLINE_S = 30.0
+
     src._persist_pair(whole[0])
     stop = threading.Event()
+    enough = threading.Event()
     observed: list[dict | None] = []
     errors: list[BaseException] = []
 
@@ -315,7 +330,11 @@ def test_interleaved_refreshes_cannot_mix_generations(cache_dir, monkeypatch):
     def reader():
         try:
             while not stop.is_set():
+                # `list.append` and `len` are atomic under the GIL, so two
+                # readers can share the list and the count without a lock.
                 observed.append(src._read_cached_pair(require_fresh=False))
+                if len(observed) >= SAMPLE_TARGET:
+                    enough.set()
         except BaseException as e:  # noqa: BLE001
             errors.append(e)
 
@@ -323,13 +342,18 @@ def test_interleaved_refreshes_cannot_mix_generations(cache_dir, monkeypatch):
     threads += [threading.Thread(target=reader) for _ in range(2)]
     for t in threads:
         t.start()
-    time.sleep(0.4)
+    # Writers keep publishing for the whole window, so the race stays open for
+    # every sample rather than only for a fixed 0.4s of it.
+    sampled_enough = enough.wait(SAMPLE_DEADLINE_S)
     stop.set()
     for t in threads:
         t.join(timeout=10.0)
 
     assert not errors, errors
-    assert len(observed) > 50, f"reader barely ran ({len(observed)} samples) — test proves little"
+    assert sampled_enough, (
+        f"only {len(observed)} of {SAMPLE_TARGET} samples in {SAMPLE_DEADLINE_S}s — "
+        "this machine is too slow to exercise the race, which is not evidence about the race"
+    )
     # Every sample is one whole generation. `None` is acceptable (a reader may
     # catch the file mid-replace on some platforms) — a *mixed* pair is not.
     mixed = [o for o in observed if o is not None and o not in whole]

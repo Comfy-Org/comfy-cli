@@ -123,16 +123,23 @@ def login_cmd(
         # We can't write an envelope to a dead stream — just fail fast.
         raise typer.Exit(code=1)
 
-    session = store.save_cloud_session(
-        base_url=result.base_url,
-        resource=result.resource,
-        client_id=result.client_id,
-        scope=result.scope,
-        access_token=result.tokens.access_token,
-        refresh_token=result.tokens.refresh_token,
-        token_type=result.tokens.token_type,
-        expires_at=result.tokens.expires_at,
-    )
+    from comfy_cli import locking
+    from comfy_cli.cloud import partner_token
+
+    with locking.file_lock(store.lock_path()):
+        replaced_record = store.get_partner_node_token()
+        session = store.save_cloud_session(
+            base_url=result.base_url,
+            resource=result.resource,
+            client_id=result.client_id,
+            scope=result.scope,
+            access_token=result.tokens.access_token,
+            refresh_token=result.tokens.refresh_token,
+            token_type=result.tokens.token_type,
+            expires_at=result.tokens.expires_at,
+        )
+
+    partner_token.warn_if_replaced_token_kept(renderer, partner_token.revoke_replaced(replaced_record))
 
     # Fill the knowledge cache while the user is online and freshly signed
     # in, so the cache-only attach path has a bundle on a brand-new install.
@@ -162,11 +169,23 @@ def login_cmd(
     )
 
 
-@app.command("logout", help="Sign out of Comfy Cloud (clears the local OAuth session).")
+@app.command(
+    "logout",
+    help=(
+        "Sign out of Comfy Cloud: clears the local OAuth session and revokes every partner-node session "
+        "of the sign-in, which also ends token renewal for Cloud jobs submitted with it."
+    ),
+)
 @tracking.track_command("cloud")
 def logout_cmd():
+    from comfy_cli import locking
+    from comfy_cli.cloud import partner_token
+    from comfy_cli.credentials import get_session
+
     renderer = get_renderer()
-    removed = store.clear_cloud_session()
+    with locking.file_lock(store.lock_path()):
+        session, record = get_session(refresh=False), store.get_partner_node_token()
+        removed = store.clear_cloud_session()
     if not removed:
         renderer.error(
             code="auth_not_signed_in",
@@ -174,20 +193,35 @@ def logout_cmd():
             hint="run: comfy cloud login",
         )
         raise typer.Exit(code=1)
+    revoked = partner_token.revoke_sessions(session, record)
+    if revoked == "failed":
+        renderer.warn(
+            "Could not revoke this sign-in's partner-node tokens, if it has any. A local ComfyUI that ran "
+            "with one can keep renewing it for up to 7 days; restart that ComfyUI to drop it."
+        )
+    elif revoked == "token":
+        renderer.warn(
+            "Revoked only the cached partner-node token. A local ComfyUI that ran with an earlier one "
+            "can keep renewing it for up to 7 days; restart that ComfyUI to drop it."
+        )
     if renderer.is_pretty():
         rprint("[bold]Signed out of Comfy Cloud.[/bold]")
-    renderer.emit({"action": "logout"}, command="cloud logout", changed=True)
+    renderer.emit({"action": "logout", "partner_node_revocation": revoked}, command="cloud logout", changed=True)
 
 
 @app.command("whoami", help="Show the current Comfy Cloud sign-in status.")
 @tracking.track_command("cloud")
 def whoami_cmd():
-    from comfy_cli.credentials import find_api_key, get_session
+    from comfy_cli.credentials import env_credential, find_api_key, get_session
 
     renderer = get_renderer()
+    # A credential handed in by env outranks the stored sign-in for every cloud
+    # call, so whoami reports that one as the identity in effect.
+    handed_in = env_credential("cloud")
     # Refresh first so we report (and persist) a live token rather than a
-    # token that quietly lapsed since the last command.
-    session = get_session(refresh=True)
+    # token that quietly lapsed since the last command — but only when the
+    # sign-in is what cloud calls will send. Otherwise it is read as stored.
+    session = get_session(refresh=handed_in is None)
     configured_base_url = get_base_url()
 
     # Ambient API key (env / store), reported even when an OAuth session
@@ -198,28 +232,47 @@ def whoami_cmd():
     if ambient_key is not None:
         api_key_source = "env" if ambient_key.source.startswith("env:") else "store"
 
-    # `signed_in` reflects *any* valid auth path — OAuth session or API key.
-    # When both are present, OAuth wins (it's the credential the client sends);
-    # the API key is only used as a fallback when no live session exists.
+    # `signed_in` reflects *any* valid auth path. Precedence matches what the
+    # client sends: a credential handed in by env (COMFY_CLOUD_AUTH_TOKEN, then
+    # COMFY_CLOUD_API_KEY), then a live OAuth session, then the stored key.
+    # `credential_source` names the one in effect ("env:<VAR>", "session",
+    # "stored:<provider>").
     has_api_key = api_key_source is not None
     has_oauth = session is not None
     expired = session.is_expired() if session else None
-    oauth_usable = has_oauth and not expired
+    # A session minted for another base URL is never sent to the configured
+    # one (the replay-guard in resolve_target), so it is not usable here.
+    stale_base_url = (session.base_url != configured_base_url) if session else False
+    oauth_usable = has_oauth and not expired and not stale_base_url
     # `signed_in` must reflect whether we can actually authenticate right now:
-    # a live (non-expired) OAuth session, or an API key. An expired,
-    # unrefreshable OAuth session is NOT signed in on its own.
-    signed_in = oauth_usable or has_api_key
+    # a handed-in credential, a live (non-expired) OAuth session, or an API
+    # key. An expired, unrefreshable OAuth session is NOT signed in on its own.
+    signed_in = handed_in is not None or oauth_usable or has_api_key
     auth_method: str | None
-    if oauth_usable:
+    credential_source: str | None
+    if handed_in is not None:
+        auth_method = handed_in.kind
+        credential_source = handed_in.source
+    elif oauth_usable:
         auth_method = "oauth"
-    elif has_api_key:
+        credential_source = "session"
+    elif ambient_key is not None:
         auth_method = "api_key"
+        credential_source = ambient_key.source
     else:
         auth_method = None
-    stale_base_url = (session.base_url != configured_base_url) if session else False
+        credential_source = None
 
     if renderer.is_pretty():
-        if has_oauth:
+        if handed_in is not None:
+            env_var = handed_in.source.removeprefix("env:")
+            rprint(f"[bold]Authenticated via {env_var}[/bold] [dim](handed in by the environment)[/dim]")
+            if has_oauth:
+                rprint(
+                    f"[dim]A stored `comfy cloud login` session ({session.base_url}) is present "
+                    f"but unused while {env_var} is set.[/dim]"
+                )
+        elif has_oauth:
             from comfy_cli.output.branding import whoami_banner
 
             renderer.console().print(
@@ -244,7 +297,8 @@ def whoami_cmd():
                         f"[dim]OAuth session is preferred; X-API-Key from {api_key_source} present but unused.[/dim]"
                     )
                 else:
-                    rprint(f"[dim]OAuth session expired — falling back to X-API-Key from {api_key_source}.[/dim]")
+                    reason = "is for another base URL" if stale_base_url else "expired"
+                    rprint(f"[dim]OAuth session {reason} — falling back to X-API-Key from {api_key_source}.[/dim]")
         else:
             from comfy_cli.output.branding import signed_out_banner
 
@@ -260,9 +314,13 @@ def whoami_cmd():
     payload: dict[str, object | None] = {
         "signed_in": signed_in,
         "auth_method": auth_method,
-        "base_url": session.base_url if session else configured_base_url,
+        # The URL the credential in effect goes to. Cloud calls always go to the
+        # configured URL (a session minted for another one is not used), so
+        # this is the configured URL; the session's own URL is in `session`.
+        "base_url": configured_base_url,
         "configured_base_url": configured_base_url,
         "api_key_source": api_key_source,
+        "credential_source": credential_source,
     }
     if session is not None:
         payload["expired"] = expired
@@ -403,6 +461,15 @@ def status_cmd(
         status_body = _billing_get(status_url, target)
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
+            from comfy_cli.command._cloud_errors import insufficient_scope_error, read_unauthorized_body
+
+            scope_body, _ = read_unauthorized_body(e)
+            scope_error = insufficient_scope_error(
+                e.code, scope_body, getattr(e, "headers", None), details={"url": status_url}
+            )
+            if scope_error is not None:
+                renderer.error(**scope_error)
+                raise typer.Exit(code=1) from e
             renderer.error(
                 code="cloud_unauthorized",
                 message=f"Comfy Cloud rejected the credential (HTTP {e.code}).",
@@ -449,7 +516,7 @@ def status_cmd(
     plans_body, _ = _billing_get_optional(target.url("billing", "plans"), target)
 
     balance_micros = billing.select_effective_balance_micros(balance_body if isinstance(balance_body, dict) else None)
-    balance_usd = billing.micros_to_usd(balance_micros)
+    balance_usd = billing.cents_to_usd(balance_micros)
     balance_credits = billing.usd_to_credits(balance_usd)
 
     subscription_status = status_body.get("subscription_status")
@@ -614,14 +681,20 @@ def set_base_url_cmd(
     cleaned = url.rstrip("/")
     config.set(CONFIG_KEY_BASE_URL, cleaned)
 
+    from comfy_cli import locking
+    from comfy_cli.cloud import partner_token
     from comfy_cli.credentials import get_session
 
     cleared_stale_session = False
-    session = get_session(refresh=False)
-    if session is not None and session.base_url != cleaned:
-        if session.is_expired():
-            store.clear_cloud_session()
-            cleared_stale_session = True
+    cleared_record = None
+    with locking.file_lock(store.lock_path()):
+        session = get_session(refresh=False)
+        if session is not None and session.base_url != cleaned:
+            if session.is_expired():
+                cleared_record = store.get_partner_node_token()
+                store.clear_cloud_session()
+                cleared_stale_session = True
+    partner_token.warn_if_replaced_token_kept(renderer, partner_token.revoke_replaced(cleared_record))
 
     if renderer.is_pretty():
         rprint(f"[bold green]Persisted cloud base URL[/bold green] → [cyan]{cleaned}[/cyan]")

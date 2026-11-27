@@ -20,6 +20,7 @@ from comfy_cli.http import (
     ResponseTooLarge,
     authed_urlopen,
     build_authed_request,
+    encode_json_body,
     no_redirect_urlopen,
     read_capped,
     request_json,
@@ -389,6 +390,18 @@ def test_request_json_post_attaches_json_body_and_content_type(monkeypatch, clou
     assert req.get_method() == "POST"
     assert json.loads(req.data) == {"name": "wf"}
     assert req.get_header("Content-type") == "application/json"
+
+
+def test_request_json_sends_exactly_the_shared_encoding(monkeypatch, cloud_target):
+    """Callers that bound their request size measure ``encode_json_body``; it must be what goes out."""
+    seen = _patch_urlopen(monkeypatch, b"{}", status=201)
+    monkeypatch.setattr("comfy_cli.http.encode_json_body", lambda body: b'{"sentinel": true}')
+    request_json("https://cloud.example/api/thing", cloud_target, method="POST", body={"name": "wf"}, max_bytes=1024)
+    assert seen[0].data == b'{"sentinel": true}'
+
+
+def test_encode_json_body_is_the_default_json_dumps_encoding():
+    assert encode_json_body({"name": "wf", "n": 1}) == b'{"name": "wf", "n": 1}'
 
 
 def test_request_json_attaches_auth_headers_for_cloud(monkeypatch, cloud_target):
@@ -806,7 +819,6 @@ def test_an_unloadable_supplement_falls_through_to_the_platform_roots(tmp_path, 
     monkeypatch.setitem(sys.modules, "certifi", types.SimpleNamespace(where=lambda: str(broken)))
 
     real = ssl.create_default_context
-    populated = len(pathlib.Path(certifi.where()).read_text().split("-----BEGIN CERTIFICATE-----")) - 1
 
     def platform_with_roots(*args, **kwargs):
         context = real(*args, **kwargs)
@@ -814,13 +826,15 @@ def test_an_unloadable_supplement_falls_through_to_the_platform_roots(tmp_path, 
             context.load_verify_locations(cafile=certifi.where())
         return context
 
+    expected_roots = set(platform_with_roots().get_ca_certs(binary_form=True))
+    assert expected_roots, "the platform fixture must contain trust roots"
     monkeypatch.setattr(ssl, "create_default_context", platform_with_roots)
 
     # When
     context = http_mod.ssl_context()
 
     # Then
-    assert context.cert_store_stats()["x509_ca"] == populated, (
+    assert set(context.get_ca_certs(binary_form=True)) == expected_roots, (
         "the platform roots must survive a supplement that would not load"
     )
 

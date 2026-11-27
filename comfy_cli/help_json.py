@@ -12,7 +12,11 @@ docstrings. Phase 2 will hoist this alongside ``comfy discover`` and add a
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from dataclasses import replace
+from datetime import datetime
+from pathlib import PurePath
+from typing import TYPE_CHECKING, Any, get_args
+from uuid import UUID
 
 import typer
 
@@ -78,7 +82,7 @@ def _param_to_dict(param: click.Parameter) -> dict[str, Any]:
         "is_flag": bool(getattr(param, "is_flag", False)),
         "multiple": bool(getattr(param, "multiple", False)),
     }
-    type_info = _type_to_dict(param.type)
+    type_info = _param_type_info(param)
     info["type"] = type_info["type"]
     if "choices" in type_info:
         info["choices"] = type_info["choices"]
@@ -91,6 +95,128 @@ def _param_to_dict(param: click.Parameter) -> dict[str, Any]:
         info["flags"] = list(param.opts) + list(param.secondary_opts)
         info["envvar"] = param.envvar
     return info
+
+
+def _param_type_info(param: click.Parameter) -> dict[str, Any]:
+    """Resolve a parameter's ``{type, choices?}`` across typer versions.
+
+    click (and typer < 0.29) expose the resolved ``click.ParamType`` as
+    ``param.type``. typer >= 0.29 rebuilt its parameter model: ``TyperOption`` /
+    ``TyperArgument`` no longer carry a ``type`` attribute (the click param is
+    built lazily at parse time), and the resolved annotation now lives on
+    ``param.type_descriptor``. Read whichever one is present and produce the same
+    contract either way, so the help JSON is identical on both.
+    """
+    t = getattr(param, "type", None)
+    if t is not None:
+        return _type_to_dict(t)
+    td = getattr(param, "type_descriptor", None)
+    if td is not None:
+        return _type_from_descriptor(td)
+    # Unknown typer internals (a future refactor). pyproject.toml caps typer below
+    # 0.29; name the fix when an install bypasses that cap (``pip install
+    # --no-deps``, a resolver override) instead of an AttributeError. The
+    # newest-typer CI lane (see .github/workflows/pytest.yml) surfaces this early.
+    raise RuntimeError(
+        f"comfy --help --json cannot read option {param.name!r}: the installed typer "
+        "exposes neither a click parameter type nor a type descriptor. comfy-cli needs "
+        "typer<0.29: pip install 'typer<0.29'"
+    )
+
+
+def _descriptor_flag(td: Any, name: str) -> bool:
+    """Read a boolean ``TypeDescriptor`` property, defaulting to False.
+
+    typer >= 0.29 computes several of these lazily and some (e.g. ``is_ranged``)
+    raise on non-class annotations like ``list[str]`` — a bare ``getattr`` default
+    only absorbs ``AttributeError``, so swallow any error and treat the flag as
+    unset. Every flag we read is "is the type this shape?", so False-on-error is
+    the correct, contract-preserving answer for the annotations that trip it.
+    """
+    try:
+        return bool(getattr(td, name))
+    except Exception:
+        return False
+
+
+def _type_from_descriptor(td: Any) -> dict[str, Any]:
+    """Build the ``{type, choices?}`` contract from a typer >= 0.29 TypeDescriptor.
+
+    Maps the descriptor back to the same ``type`` strings the ``click.ParamType``
+    path emits — ``"choice"``, ``"int range"`` / ``"float range"``, ``"path"`` /
+    ``"file"`` / ``"directory"``, ``"filename"``, ``"boolean"``, ``"int"``, ``"float"``, ``"str"`` — so the contract does not
+    drift when the installed typer crosses 0.29.
+    """
+    if _descriptor_flag(td, "is_choice"):
+        # ``choices`` are enum members on typer >= 0.29; emit their values, as the
+        # ``click.Choice`` path did (``schemas/help.json`` requires strings).
+        choices = getattr(td, "choices", None) or ()
+        return {
+            "type": "choice",
+            "choices": [str(getattr(c, "value", c)) for c in choices],
+        }
+    args = get_args(td.annotation)
+    # A ``tuple[...]`` option is one composite value; the click path named every
+    # component (``click.Tuple`` -> ``"<str int>"``), so do the same.
+    if _descriptor_flag(td, "is_tuple") and args:
+        return {"type": "<" + " ".join(_element_type_name(td, a) for a in args) + ">"}
+    # ``multiple`` options carry a ``list[...]`` annotation; the click path
+    # reported the element type, so unwrap to it.
+    if _descriptor_flag(td, "is_list") and args:
+        return {"type": _element_type_name(td, args[0])}
+    return {"type": _element_type_name(td, td.annotation)}
+
+
+def _element_type_name(td: Any, annotation: Any) -> str:
+    """Name one scalar ``annotation`` the way its ``click.ParamType`` would.
+
+    Re-checks the flags against ``annotation`` with the parameter's own
+    ``min``/``max`` metadata (``td.parameter_info``), as the click path did per
+    element: ``list[int]`` with ``min=1`` is ``"int range"``, without it ``"int"``.
+    """
+    elem = replace(td, annotation=annotation)
+    if _descriptor_flag(elem, "is_choice"):
+        return "choice"
+    if isinstance(annotation, type) and annotation not in _NOT_PATH_ROUTED:
+        # typer < 0.29 built a ``click.Path`` (named from ``file_okay`` /
+        # ``dir_okay``) for a path annotation *or* any parameter carrying path
+        # metadata, checked before its file markers: a ``FileText`` option with
+        # ``resolve_path=True`` was ``"path"``, not ``"filename"``.
+        if issubclass(annotation, PurePath) or _has_path_routing(td.parameter_info):
+            return _path_type_name(td.parameter_info)
+        # typer's file markers built a ``click.File``, named ``"filename"``.
+        if issubclass(annotation, _FILE_MARKERS):
+            return "filename"
+    base = {bool: "boolean", int: "int", float: "float", str: "str"}.get(
+        annotation, getattr(annotation, "__name__", str(annotation)).lower()
+    )
+    if _descriptor_flag(elem, "is_ranged"):
+        return f"{base} range"
+    return base
+
+
+_FILE_MARKERS = (typer.FileText, typer.FileTextWrite, typer.FileBinaryRead, typer.FileBinaryWrite)
+
+# typer < 0.29 resolved these annotations to their own click types before it
+# considered path metadata, so ``allow_dash`` / ``resolve_path`` never made them
+# a ``click.Path``.
+_NOT_PATH_ROUTED = (bool, int, float, str, UUID, datetime)
+
+
+def _has_path_routing(parameter_info: Any) -> bool:
+    """Whether typer < 0.29 would have built a ``click.Path`` from this metadata."""
+    return any(getattr(parameter_info, k, None) for k in ("allow_dash", "path_type", "resolve_path"))
+
+
+def _path_type_name(parameter_info: Any) -> str:
+    """Name a path the way ``click.Path`` does: ``"file"``, ``"directory"`` or ``"path"``."""
+    file_okay = getattr(parameter_info, "file_okay", True)
+    dir_okay = getattr(parameter_info, "dir_okay", True)
+    if file_okay and not dir_okay:
+        return "file"
+    if dir_okay and not file_okay:
+        return "directory"
+    return "path"
 
 
 def _type_to_dict(t: click.ParamType) -> dict[str, Any]:

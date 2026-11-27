@@ -23,10 +23,11 @@ import re
 import time
 import urllib.parse
 import urllib.request
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,9 @@ MAX_MODELS = 3
 MAX_MODELS_BRIEF = 20
 MAX_PICKS = 8
 MAX_LIST_ITEMS = 8
+# Suggestions offered when a capability query matches nothing outright. Small on
+# purpose: the point of the miss payload is to stop being a catalog dump.
+MAX_CANDIDATES = 5
 # best_for items per pick. Bounds item count, not bytes: with today's bundle, 1
 # keeps every capability's `knowledge pick` envelope under the 4096 bytes the
 # cloud agent admits verbatim (2, or not_for alongside, sends image-edit over),
@@ -55,8 +59,33 @@ MAX_LIST_ITEMS = 8
 # under that.
 MAX_PICK_BEST_FOR = 1
 MAX_BLOCK_BYTES = 8192
+MAX_DISCOVERY_ROUTES = 8
+MAX_DISCOVERY_ITEMS = 8
+MAX_DISCOVERY_TEXT_CHARS = 1024
+MAX_DISCOVERY_ID_CHARS = 256
+MAX_DISCOVERY_BYTES = 8192
 MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the lookup key and the nudge echo
 MAX_VERSION_CHARS = 64
+MAX_AUTHORING_SLICE_BYTES = 8192
+MAX_AUTHORING_METADATA_BYTES = 2048
+# The producer's vocabulary, not ours: every value here is a `retrieval_classes`
+# entry declared by a slice in comfy-knowledge's `custom-node-authoring`
+# playbook. A class absent from this tuple makes `_index_custom_node_authoring`
+# skip the slice that declares it, so the producer's content stays unreachable
+# until the class is added here. Last reconciled against comfy-knowledge
+# `7a3574e3deeae860f46901c39e3606f7a3acfc96`, which added `execution-caching`.
+AUTHORING_CLASSES = (
+    "invocation",
+    "ecosystem-reference",
+    "api-schema",
+    "validation",
+    "dependencies-capabilities",
+    "troubleshooting",
+    "packaging-publishing",
+    "frontend-extension",
+    "v1-to-v3-migration",
+    "execution-caching",
+)
 
 UNAVAILABLE_LOCALLY = "the templates or nodes this row resolves to are absent from this install"
 # `knowledge pick --check-local` reasons, kept short: each flagged pick repeats one.
@@ -113,14 +142,20 @@ class Bundle:
     templates: dict[str, list[str]]  # template id -> model ids
     nodes: dict[str, list[str]]  # node class -> model ids
     model_capabilities: dict[str, list[str]]  # model id -> capability ids that rank it
+    custom_node_authoring: tuple[dict[str, Any], ...]
     # _normalize(alias) -> id. A key two ids would share is left out, so only the
     # exact path decides it; a real id always keeps its own key.
     normalized_aliases: dict[str, str] = field(default_factory=dict)
     normalized_capabilities: dict[str, str] = field(default_factory=dict)
-    # (word set, normalized key, capability id) for every capability id and alias,
-    # so an intent phrase reaches the row its own wording names. See :func:`_resolve_tokens`.
-    capability_tokens: tuple[tuple[frozenset[str], str, str], ...] = ()
+    # (word multiset, normalized key, capability id) for every capability id and alias,
+    # so an intent phrase reaches the row its own wording names. A multiset, not a set,
+    # so a key that repeats a word is not fully matched by one of it. See
+    # :func:`_resolve_tokens`.
+    capability_tokens: tuple[tuple[tuple[tuple[str, int], ...], str, str], ...] = ()
     capability_context: dict[str, frozenset[str]] = field(default_factory=dict)
+    # Lowercase lookup keys whose raw spelling is eligible for suggestions.
+    # Kept separate because lower() can hide non-ASCII alphanumerics (e.g. K).
+    candidate_aliases: dict[str, str] = field(default_factory=dict)
 
 
 # One-element tuple so a memoized ``None`` is distinguishable from "not loaded yet".
@@ -224,16 +259,47 @@ def _tokens(s: str) -> frozenset[str]:
     return frozenset(w for w in map(_stem, _split(s)) if w not in _FILLER_STEMS)
 
 
+def _counts(s: str) -> Counter[str]:
+    """:func:`_tokens` as a multiset, so a key that says a word twice needs it twice.
+
+    A set collapses "Video to Video" to ``{video}``, which makes the key a full
+    match for any query carrying the bare word - and a full match skips the
+    description test in :func:`_resolve_tokens` entirely, so one generic noun
+    turns its capability into a catch-all.
+    """
+    return Counter(w for w in map(_stem, _split(s)) if w not in _FILLER_STEMS)
+
+
 def _short_key(key: str) -> bool:
     """A one-word key (filler aside) under MIN_SINGLE_TOKEN_CHARS never matches on wording."""
     raw = {w for w in _split(key) if _stem(w) not in _FILLER_STEMS}
     return len(raw) == 1 and len(next(iter(raw))) < MIN_SINGLE_TOKEN_CHARS
 
 
-def _query_tokens(s: str) -> frozenset[str]:
-    """:func:`_tokens` plus each adjacent pair joined, so "lip sync" reaches the key ``lipsync``."""
+def _query_counts(s: str) -> Counter[str]:
+    """:func:`_counts` plus each adjacent pair joined, so "lip sync" reaches the key ``lipsync``.
+
+    The pair joins are single-counted: they are spelling aids, not words the
+    caller wrote twice.
+    """
     words = _split(s)
-    return _tokens(s) | frozenset(_stem(a + b) for a, b in zip(words, words[1:]))
+    counts = _counts(s)
+    counts.update(frozenset(_stem(a + b) for a, b in zip(words, words[1:])) - set(counts))
+    return counts
+
+
+def _contains_normalized_word_span(query: str, key_norm: str) -> bool:
+    """Whether complete adjacent query words normalize exactly to ``key_norm``."""
+    words = _split(query)
+    for start in range(len(words)):
+        span = ""
+        for word in words[start:]:
+            span += word
+            if span == key_norm:
+                return True
+            if len(span) >= len(key_norm):
+                break
+    return False
 
 
 def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[str, str]:
@@ -282,6 +348,44 @@ def resolve_id(bundle: Bundle, query: str) -> str | None:
 def resolve(bundle: Bundle, query: str) -> dict | None:
     model_id = resolve_id(bundle, query)
     return bundle.models[model_id] if model_id is not None else None
+
+
+def _candidate_tokens(value: str) -> list[str]:
+    # Suggestions support ASCII names only. Never discard a Unicode qualifier
+    # or digit, or normalize it into a different family/version spelling.
+    if any(char.isalnum() and not char.isascii() for char in value):
+        return []
+    return re.findall(r"[a-z]+|[0-9]+", value.lower())
+
+
+def model_candidates(bundle: Bundle, query: str) -> list[str]:
+    """At most five canonical ids for an incomplete family/version name.
+
+    Suggestions only: even one candidate requires the caller to confirm the
+    model. Match the family word exactly, preserve every numeric component,
+    and allow omitted words, not substituted words or reordered tokens.
+    """
+    if len(query) > MAX_QUERY_CHARS:
+        return []
+    parts = _candidate_tokens(query)
+    numbers = [part for part in parts if part.isdigit()]
+    if not parts or not parts[0].isalpha() or not numbers:
+        return []
+    candidates: set[str] = set()
+    for alias, model_id in bundle.candidate_aliases.items():
+        if model_id not in bundle.models:
+            continue
+        # A case-only twin of another id loses the shared lowercase key, so
+        # `resolve <id>` would land on the other model; never suggest it.
+        if resolve_id(bundle, model_id) != model_id:
+            continue
+        words = _candidate_tokens(alias)
+        if not words or words[0] != parts[0] or [word for word in words if word.isdigit()] != numbers:
+            continue
+        remaining = iter(words[1:])
+        if all(part in remaining for part in parts[1:]):
+            candidates.add(model_id)
+    return sorted(candidates)[:5]
 
 
 def pick(bundle: Bundle, capability: str) -> dict | None:
@@ -506,22 +610,115 @@ def _append_unique(index: dict[str, list[str]], key: str, model_id: str) -> None
         ids.append(model_id)
 
 
+def _heading_section(content: str, heading: str) -> str | None:
+    """Return one Markdown section named by producer slice metadata."""
+    lines = content.splitlines(keepends=True)
+    heading_pattern = re.compile(r"^(?P<marks>#+)\s+(?P<title>.*?)\s*$")
+    fence_pattern = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})(?P<tail>.*)$")
+    start = level = None
+    fence: tuple[str, int] | None = None
+    for index, line in enumerate(lines):
+        fence_match = fence_pattern.match(line)
+        if fence_match:
+            marker = fence_match.group("marker")
+            if fence is None:
+                fence = (marker[0], len(marker))
+            elif marker[0] == fence[0] and len(marker) >= fence[1] and not fence_match.group("tail").strip():
+                fence = None
+            continue
+        match = heading_pattern.match(line) if fence is None else None
+        if match and start is None and match.group("title") == heading:
+            start, level = index, len(match.group("marks"))
+        elif match and start is not None and len(match.group("marks")) <= level:
+            return "".join(lines[start:index]).rstrip() + "\n"
+    return None if start is None else "".join(lines[start:]).rstrip() + "\n"
+
+
+def _utf8_size(value: str) -> int | None:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
+
+
+def _index_custom_node_authoring(data: dict) -> tuple[dict[str, Any], ...]:
+    """Validate and index the canonical producer's bounded playbook slices."""
+    playbooks = data.get("playbooks")
+    playbook = playbooks.get("custom-node-authoring") if isinstance(playbooks, dict) else None
+    if not isinstance(playbook, dict) or not isinstance(playbook.get("content"), str):
+        return ()
+    slices = playbook.get("slices")
+    if not isinstance(slices, list):
+        return ()
+
+    indexed: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for item in slices:
+        if not isinstance(item, dict) or set(item) != {"id", "heading", "retrieval_classes", "api_generations"}:
+            continue
+        slice_id, heading = item["id"], item["heading"]
+        classes, generations = item["retrieval_classes"], item["api_generations"]
+        if (
+            not isinstance(slice_id, str)
+            or not isinstance(heading, str)
+            or not slice_id
+            or slice_id in seen_ids
+            or not isinstance(classes, list)
+            or not classes
+            or not all(isinstance(value, str) and value in AUTHORING_CLASSES for value in classes)
+            or len(set(classes)) != len(classes)
+            or not isinstance(generations, list)
+            or not generations
+            or not all(value in ("v1", "v3") for value in generations)
+            or len(set(generations)) != len(generations)
+        ):
+            continue
+        metadata_size = _utf8_size(json.dumps(item))
+        if metadata_size is None or metadata_size > MAX_AUTHORING_METADATA_BYTES:
+            continue
+        content = _heading_section(playbook["content"], heading)
+        content_size = _utf8_size(content) if content is not None else None
+        if content is None or not content.strip() or content_size is None or content_size > MAX_AUTHORING_SLICE_BYTES:
+            continue
+        seen_ids.add(slice_id)
+        indexed.append(
+            {
+                "id": slice_id,
+                "heading": heading,
+                "retrieval_classes": tuple(classes),
+                "api_generations": tuple(generations),
+                "content": content,
+            }
+        )
+    return tuple(indexed)
+
+
 def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path: str, mtime: float) -> Bundle:
     models = {mid: row for mid, row in data["models"].items() if isinstance(mid, str) and isinstance(row, dict)}
 
     # Exact ids first so no alias can shadow a model's own id; then the compiled
     # alias map, which wins over row-level aliases.
     aliases: dict[str, str] = {}
+    candidate_aliases: dict[str, str] = {}
+
+    def index_alias(alias: str, mid: str) -> None:
+        key = alias.lower()
+        owner = aliases.setdefault(key, mid)
+        # Check before casing loses information, and retain resolution precedence.
+        # A valid ASCII spelling may still support the same winning target.
+        if owner == mid and _candidate_tokens(alias):
+            candidate_aliases.setdefault(key, mid)
+
     for mid in models:
-        aliases.setdefault(mid.lower(), mid)
+        index_alias(mid, mid)
     compiled = data.get("aliases")
     if isinstance(compiled, dict):
         for alias, mid in compiled.items():
             if isinstance(alias, str) and isinstance(mid, str):
-                aliases.setdefault(alias.lower(), mid)
+                index_alias(alias, mid)
     for mid, row in models.items():
         for alias in _str_list(row.get("aliases")):
-            aliases.setdefault(alias.lower(), mid)
+            index_alias(alias, mid)
 
     caps_raw = data.get("capabilities")
     capabilities = (
@@ -529,6 +726,7 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         if isinstance(caps_raw, dict)
         else {}
     )
+    custom_node_authoring = _index_custom_node_authoring(data)
     deps_raw = data.get("deprecations")
     deprecations = (
         {d["id"]: d for d in deps_raw if isinstance(d, dict) and isinstance(d.get("id"), str)}
@@ -574,13 +772,13 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
                 capability_keys.setdefault(alias, cid)
 
     capability_tokens = tuple(
-        (words, _normalize(key), cid)
+        (tuple(sorted(counts.items())), _normalize(key), cid)
         for key, cid in capability_keys.items()
-        if (words := _tokens(key)) and not _short_key(key)
+        if (counts := _counts(key)) and not _short_key(key)
     )
     key_words: dict[str, set[str]] = defaultdict(set)
-    for words, _, cid in capability_tokens:
-        key_words[cid] |= words
+    for count_items, _, cid in capability_tokens:
+        key_words[cid] |= {word for word, _ in count_items}
     capability_context = {
         cid: _tokens(_CONTEXT_END.split(desc, maxsplit=1)[0]) - key_words[cid]
         for cid, cap in capabilities.items()
@@ -600,9 +798,11 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         capabilities=capabilities,
         deprecations=deprecations,
         aliases=aliases,
+        candidate_aliases=candidate_aliases,
         templates=templates,
         nodes=nodes,
         model_capabilities=model_capabilities,
+        custom_node_authoring=custom_node_authoring,
         normalized_aliases=_normalized_map(aliases, ids=models),
         normalized_capabilities=_normalized_map(capability_keys, ids=capabilities),
         capability_tokens=capability_tokens,
@@ -638,12 +838,30 @@ def _lookup(bundle: Bundle, queries: Iterable[str]) -> tuple[list[tuple[str, str
     return models, caps
 
 
-def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
-    """Capability whose id or alias is worded inside ``query``; ``None`` if none is.
+@lru_cache(maxsize=4096)
+def _key_counter(count_items: tuple[tuple[str, int], ...]) -> Counter:
+    """Counter for a capability key's word multiset, built once per distinct key.
 
-    Callers ask in sentences ("image to 3d model mesh") while the bundle is keyed
-    on tags and ids ("Image to Model", "image-to-3d"), and :func:`_normalize`
-    only strips punctuation, so the exact path misses everything phrased.
+    :data:`Bundle.capability_tokens` stores the multiset as a sorted tuple so the
+    frozen dataclass stays hashable, which means a ``Counter`` cannot live in the
+    field itself. Rebuilding one per capability *per lookup* made each lookup about
+    13x slower than it needs to be (comfy-cli owner review, 2026-10-07): the keys do
+    not change between calls, only the query does.
+
+    The returned Counter is SHARED across callers, so treat it as read-only.
+    :func:`_resolve_tokens` only ever uses ``-`` and ``&``, which return new Counters
+    and leave the operand untouched.
+    """
+    return Counter(dict(count_items))
+
+
+def _score_capabilities(bundle: Bundle, query: str) -> dict[str, tuple[float, int, int, int]]:
+    """Every capability ``query`` touches at all, keyed to its match score.
+
+    Split out of :func:`_resolve_tokens` so the ranking has exactly one
+    implementation. That function needs only the unambiguous winner and throws
+    the rest away; :func:`capability_candidates` needs the runners-up, and a
+    second scoring loop would be free to drift from this one.
 
     Each key scores by the share of its words the query contains. A full match
     always counts. A partial one counts only when the query shares more words
@@ -653,30 +871,80 @@ def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
     out literally in the query wins ("text to image" over ``text-in-image``),
     then the one whose description the query echoes.
 
-    Ambiguity resolves to nothing rather than to a guess, matching
-    :func:`_normalized_map`: a tie between two capabilities is not an answer.
+    Repeated words in a key count only when that key is literally present in the
+    query. Otherwise each query word contributes at most once, so a phrase that
+    happens to repeat a generic noun cannot satisfy a repeated-word alias.
     """
-    words = _query_tokens(query)
-    if not words:
-        return None
+    counts = _query_counts(query)
+    if not counts:
+        # Empty mapping, never None: this used to be `_resolve_tokens`'s own
+        # early return, where the later `if not scored` guard absorbed it. A
+        # second caller does not have that guard, so a query with no scoring
+        # tokens ("generate", "???", non-Latin text) would crash the miss path
+        # instead of answering it.
+        return {}
+    words = frozenset(counts)
     literal = _normalize(query)
     scored: dict[str, tuple[float, int, int, int]] = {}
-    for key_words, key_norm, cid in bundle.capability_tokens:
-        hit = key_words & words
+    for count_items, key_norm, cid in bundle.capability_tokens:
+        key_counts = _key_counter(count_items)
+        # Normalization intentionally ignores punctuation, but a normalized key
+        # may also be a prefix of a longer word ("video to videogame").  A
+        # repeated-word key is literal only when the query contains enough
+        # distinct word tokens to satisfy its multiplicity.
+        literal_hit = (
+            key_norm in literal and _contains_normalized_word_span(query, key_norm) and not (key_counts - counts)
+        )
+        query_counts = counts if literal_hit else Counter(words)
+        overlap = key_counts & query_counts
+        hit = sum(overlap.values())
         if not hit:
             continue
         context = len(bundle.capability_context.get(cid, frozenset()) & words)
-        missing = len(key_words) - len(hit)
+        missing = sum(key_counts.values()) - hit
         if missing and context <= missing:
             continue
-        score = (len(hit) / len(key_words), len(hit), len(key_norm) if key_norm in literal else 0, context)
+        # Distinct overlap breaks ties: repeating one generic word must not tie a
+        # specialist key that matched two different words.
+        score = (hit / (hit + missing), len(overlap), len(key_norm) if literal_hit else 0, context)
         if score > scored.get(cid, (0.0, 0, 0, 0)):
             scored[cid] = score
+    return scored
+
+
+def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
+    """Capability whose id or alias is worded inside ``query``; ``None`` if none is.
+
+    Callers ask in sentences ("image to 3d model mesh") while the bundle is keyed
+    on tags and ids ("Image to Model", "image-to-3d"), and :func:`_normalize`
+    only strips punctuation, so the exact path misses everything phrased.
+
+    Ambiguity resolves to nothing rather than to a guess, matching
+    :func:`_normalized_map`: a tie between two capabilities is not an answer.
+    """
+    scored = _score_capabilities(bundle, query)
     if not scored:
         return None
     best = max(scored.values())
     winners = [cid for cid, score in scored.items() if score == best]
     return winners[0] if len(winners) == 1 else None
+
+
+def capability_candidates(bundle: Bundle, query: str, limit: int = MAX_CANDIDATES) -> list[str]:
+    """Best-scoring capability ids for ``query``, most likely first.
+
+    :func:`_resolve_tokens` answers only when one capability wins outright, which
+    is right for routing: a tie must not become a guess. But a caller that got no
+    answer still has to be told something, and "here is the whole catalog" is not
+    it. These are the rows that scored at all, so a tie becomes two suggestions
+    instead of silence.
+
+    Ordering is the full score tuple descending, then id ascending so the list is
+    stable for the same bundle and query.
+    """
+    scored = _score_capabilities(bundle, query)
+    ranked = sorted(scored.items(), key=lambda kv: (tuple(-part for part in kv[1]), kv[0]))
+    return [cid for cid, _ in ranked[: max(0, limit)]]
 
 
 def _text(value: Any) -> str | None:
@@ -753,6 +1021,60 @@ def pick_entry(bundle: Bundle, p: dict) -> dict:
     if best_for := [x for x in _str_list(row.get("best_for")) if x][:MAX_PICK_BEST_FOR]:
         entry["best_for"] = best_for
     return entry
+
+
+def discovery_entries(capability: dict) -> list[dict]:
+    """Project authored discovery routes into a bounded, explicitly unranked contract."""
+    raw_routes = capability.get("discovery")
+    if not isinstance(raw_routes, list):
+        return []
+    out: list[dict] = []
+    for raw in raw_routes[:MAX_DISCOVERY_ROUTES]:
+        if not isinstance(raw, dict):
+            continue
+        route = _text(raw.get("route"))
+        if not route:
+            continue
+        entry: dict[str, Any] = {"route": route[:MAX_DISCOVERY_ID_CHARS], "ranking": "unranked"}
+        if description := _text(raw.get("description")):
+            entry["description"] = description[:MAX_DISCOVERY_TEXT_CHARS]
+        templates = [x[:MAX_DISCOVERY_ID_CHARS] for x in _str_list(raw.get("templates"))[:MAX_DISCOVERY_ITEMS]]
+        if templates:
+            entry["templates"] = templates
+        nodes = []
+        raw_nodes = raw.get("nodes")
+        if isinstance(raw_nodes, list):
+            for raw_node in raw_nodes[:MAX_DISCOVERY_ITEMS]:
+                if not isinstance(raw_node, dict) or not (node_id := _text(raw_node.get("id"))):
+                    continue
+                node = {"id": node_id[:MAX_DISCOVERY_ID_CHARS]}
+                if description := _text(raw_node.get("description")):
+                    node["description"] = description[:MAX_DISCOVERY_TEXT_CHARS]
+                nodes.append(node)
+        if nodes:
+            entry["nodes"] = nodes
+        raw_requires = raw.get("requires")
+        if isinstance(raw_requires, dict):
+            requires: dict[str, Any] = {}
+            if comfyui := _text(raw_requires.get("comfyui")):
+                requires["comfyui"] = comfyui[:MAX_VERSION_CHARS]
+            distributions = [
+                x[:MAX_VERSION_CHARS] for x in _str_list(raw_requires.get("distributions"))[:MAX_DISCOVERY_ITEMS]
+            ]
+            if distributions:
+                requires["distributions"] = distributions
+            if requires:
+                entry["requires"] = requires
+        out.append(entry)
+    while out and len(json.dumps(out, ensure_ascii=False).encode()) > MAX_DISCOVERY_BYTES:
+        out.pop()
+    return out
+
+
+def discovery_failure_policy(capability: dict) -> str | None:
+    """Return the bounded authored reporting policy for a capability, when present."""
+    policy = _text(capability.get("failure_policy"))
+    return policy[:MAX_DISCOVERY_TEXT_CHARS] if policy else None
 
 
 def _pick_entries(bundle: Bundle, capability_id: str, *, catalog_templates: Collection[str] | None) -> list[dict]:

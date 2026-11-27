@@ -112,6 +112,31 @@ _SENSITIVE_EXACT = frozenset(
         "from_workflow",
         "workflow",
         "capability",
+        # A ComfyUI clientId is capability-bearing: anyone who can reach the
+        # server and knows it both receives that client's execution events and
+        # evicts its socket by connecting as it. Redacted rather than dropped,
+        # so "was --client-id used" stays measurable.
+        "client_id",
+        "query",
+        "repo",
+        "repository",
+        "commit",
+        "file",
+        # `workflow add-node --text`: a note body is verbatim user content, like
+        # `--prompt` — analytics only learns that the option was supplied.
+        "text",
+        # `deploy run --allow-upload` names the hashes of a person's own files.
+        "allow_upload",
+        # `model upload --workspace` names a Comfy Cloud workspace, which can
+        # identify a customer; `--expected-sha256` names one of their files.
+        # The kwarg is `workspace_id`, not `workspace`, so `deploy --workspace`
+        # (a bool) stays measurable.
+        "workspace_id",
+        "expected_sha256",
+        # `--models-dir` (repeatable, so a list: the whole list is redacted) and
+        # `--out` are local paths, typed `str` like `--workflow`.
+        "models_dir",
+        "out",
     }
 )
 
@@ -478,6 +503,31 @@ class MixpanelProvider:
                 self._drained.wait(timeout=min(remaining, 0.1))
 
 
+# Every name posthog has used for its event-delivery atexit hook. Both are
+# unregistered unconditionally: `atexit.unregister` is a no-op for a callable that
+# was never registered, so covering a name the installed version lacks is free,
+# while covering only the name it has is version-dependent and silently wrong.
+_POSTHOG_ATEXIT_HOOKS = ("join", "_atexit")
+
+# Posthog's OTHER atexit hooks, deliberately left registered. They drain the spans
+# and metrics-autocapture features, which this provider does not use and which
+# `PostHogProvider.flush` would therefore not drain either — so unregistering them
+# would lose whatever they carry rather than bound it. Listed rather than ignored so
+# a NEW hook name shows up as unhandled in
+# `test_every_posthog_atexit_hook_is_either_unregistered_or_explicitly_kept`
+# instead of being silently treated as one of these.
+#
+# NEITHER NAME EXISTS IN THE RANGE THIS PROJECT PINS. `posthog>=6,<8` registers
+# exactly one atexit hook from `posthog/client.py` — `self.join` up to 7.38.0,
+# `self._atexit` from 7.38.1 — and greps clean for both names below. They appear
+# first in posthog 8.x (8.2.5: `_atexit_metrics_autocapture` in the constructor,
+# `_atexit_spans` registered lazily when tracing is used), so this tuple is
+# forward-looking at the next major bump and cannot affect shutdown today. That
+# also answers the live question about them: an installed version in range enables
+# neither feature by default, because neither hook is there to enable.
+_POSTHOG_ATEXIT_HOOKS_KEPT = ("_atexit_spans", "_atexit_metrics_autocapture")
+
+
 class PostHogProvider:
     _STANDARD_PROPERTIES = {
         "environment": "cli",
@@ -500,13 +550,53 @@ class PostHogProvider:
         # can't linger on a blackholed endpoint after the terminal envelope is
         # already on stdout.
         self.client = Posthog(project_api_key=token, host=host, disable_geoip=False, max_retries=1, timeout=10)
-        # Posthog's constructor registers its own atexit.register(self.join),
-        # which runs self.join() synchronously on the main thread at shutdown —
-        # independently of _flush_all_providers and NOT bounded by its daemon
-        # deadline. Against a blackholed endpoint that join can still block ~21s
-        # after the terminal envelope is on stdout, defeating this change. Drop it
-        # so our bounded flush is the only shutdown drain path.
-        atexit.unregister(self.client.join)
+        # Posthog's constructor registers its own atexit hook, which runs
+        # synchronously on the main thread at shutdown — independently of
+        # _flush_all_providers and NOT bounded by its daemon deadline. Against a
+        # blackholed endpoint it can block after the terminal envelope is already
+        # on stdout, defeating this change. Drop it so our bounded flush is the
+        # only shutdown drain path.
+        #
+        # The hook's NAME IS NOT STABLE across the versions this project's pin
+        # permits, and `atexit.unregister` against a callable that was never
+        # registered silently does nothing. posthog 6.0.0 through 7.38.0 register
+        # `self.join`; 7.38.1 (2026-08-12) renamed it to `self._atexit`, which
+        # closes every delivery lane against a 1.0s process-global deadline
+        # (`_ATEXIT_FLUSH_TIMEOUT_SECONDS`). Both are inside `posthog>=6,<8`, so
+        # a fresh install resolving to 7.38.1+ gets the new name while uv.lock
+        # pins 7.18.1 and gets the old one — which is why this held in CI and not
+        # on PyPI. The boundary is read off the wheels: 7.38.0's `client.py` has
+        # `atexit.register(self.join)`, 7.38.1's has
+        # `atexit.register(self._atexit)`.
+        #
+        # Order makes it matter rather than merely waste a call: atexit runs LIFO,
+        # this module registers `_flush_all_providers` at import, and the client
+        # is built lazily on the first send, so posthog's hook is always the LATER
+        # registration and therefore runs FIRST. With the unregister dead, its 1s
+        # bound closes the consumers and our 5s drain then flushes a stopped
+        # client — the queued `command_finished` event is the one that goes.
+        #
+        # So read the names off the client with getattr rather than naming one.
+        # Unregistering a name the installed version does not have costs nothing;
+        # naming only the one it does have is the bug this replaces.
+        #
+        # THERE IS NO RUNTIME CHECK THAT THIS REMOVED ANYTHING, and the obvious one
+        # does not work: `atexit._ncallbacks()` counts registered SLOTS, and
+        # `atexit.unregister` NULLs a slot without decrementing. Measured on
+        # CPython 3.12.3 with two lines — register one bound method, unregister the
+        # same bound method, count goes 0 -> 1 -> 1 — while the hook provably stops
+        # running. So a before/after count cannot distinguish a removal from a
+        # no-op, in any version, and there is no public API that enumerates the
+        # callbacks. The guard is therefore a test, not an assertion here:
+        # `test_posthog_provider_unregisters_every_hook_a_real_client_actually_registers`
+        # records what the INSTALLED client registers and requires each one to be
+        # unregistered or deliberately kept. That test only ever sees the pinned
+        # version, so a fresh install resolving past the pin is covered instead by
+        # `_POSTHOG_ATEXIT_HOOKS` carrying every name posthog has used.
+        for hook_name in _POSTHOG_ATEXIT_HOOKS:
+            hook = getattr(self.client, hook_name, None)
+            if hook is not None:
+                atexit.unregister(hook)
         self.enabled = True
 
     def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:
@@ -732,9 +822,67 @@ def filter_command_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Runs of a ``track_command`` command that have started and not yet sent
+# ``command_finished``, innermost last. ``flush_for_hard_exit`` finishes them,
+# because ``os._exit`` skips the wrapper's ``finally``.
+_OpenCommand = tuple[dict[str, Any], float]
+_open_commands: list[_OpenCommand] = []
+
+
+def _exit_code_of(exit_: typer.Exit | SystemExit) -> int:
+    if isinstance(exit_, typer.Exit):
+        return exit_.exit_code
+    # SystemExit(None) ends with 0 and SystemExit("message") with 1, as Python does.
+    if exit_.code is None:
+        return 0
+    return exit_.code if isinstance(exit_.code, int) else 1
+
+
+# What `cmdline.main` exits with once a KeyboardInterrupt reaches it.
+_CTRL_C_EXIT_CODE = 130
+
+
+def _record_exit(finished: dict[str, Any], code: int) -> None:
+    # A zero exit is a normal end and carries no code; only a non-zero one names it.
+    if code == 0:
+        finished["outcome"] = "ok"
+    else:
+        finished.update(outcome="exit", exit_code=code)
+
+
+def _finish(run: _OpenCommand) -> None:
+    """Send ``command_finished`` for ``run`` once, whichever of the wrapper's
+    ``finally`` and ``flush_for_hard_exit`` gets there first."""
+    for index in range(len(_open_commands) - 1, -1, -1):
+        if _open_commands[index] is run:
+            del _open_commands[index]
+            break
+    else:
+        return
+    finished, started = run
+    finished["seconds"] = round(time.monotonic() - started, 3)
+    track_event("command_finished", properties=finished)
+
+
 def track_command(sub_command: str | None = None):
     """
-    A decorator factory that logs the command function name and selected arguments when it's called.
+    A decorator factory that records a command run as two events: the command's
+    own event when it starts, as before, and ``command_finished`` when it ends.
+
+    The start event is unchanged, so every count that reads it stays a count of
+    commands, and a long-running command (``launch``, ``run``) is still counted the
+    moment it starts rather than when, or whether, it exits. ``command_finished``
+    carries ``command``, ``seconds`` and ``outcome``: ``ok`` for a normal return or
+    a zero exit, ``exit`` for a non-zero ``typer.Exit`` or ``SystemExit`` (with
+    ``exit_code``), and ``error`` for an exception (with ``error_type``, the class
+    name only: a message can carry a path or a credential). Ctrl-C is an ``exit``
+    with ``exit_code`` 130 whether the command catches it or lets
+    ``KeyboardInterrupt`` through, since the entry point turns the latter into 130
+    too. The exception or exit then propagates as before. A command that ends in
+    ``os._exit`` finishes through ``flush_for_hard_exit``, which must be given the
+    code; a negative code there is a child the command waited on being killed by
+    that signal, recorded as ``killed`` with ``signal``. A command that never
+    ends has a start row and no finish row, which is itself the answer.
     """
 
     def decorator(func):
@@ -745,7 +893,26 @@ def track_command(sub_command: str | None = None):
             logging.debug(f"Tracking command: {command_name} with arguments: {filtered_kwargs}")
             track_event(command_name, properties=filtered_kwargs)
 
-            return func(*args, **kwargs)
+            run: _OpenCommand = ({"command": command_name}, time.monotonic())
+            _open_commands.append(run)
+            try:
+                result = func(*args, **kwargs)
+            except (typer.Exit, SystemExit) as exit_:
+                _record_exit(run[0], _exit_code_of(exit_))
+                raise
+            except KeyboardInterrupt:
+                # The entry point (`cmdline.main`) turns it into exit 130, so the
+                # run ends the way a command that caught Ctrl-C itself ends.
+                _record_exit(run[0], _CTRL_C_EXIT_CODE)
+                raise
+            except BaseException as error:
+                run[0].update(outcome="error", error_type=type(error).__name__)
+                raise
+            else:
+                run[0]["outcome"] = "ok"
+                return result
+            finally:
+                _finish(run)
 
         return wrapper
 
@@ -878,8 +1045,13 @@ def _flush_all_providers() -> None:
             logging.debug(f"telemetry flush timed out for {type(provider).__name__}; dropping in-flight events")
 
 
-def flush_for_hard_exit() -> None:
+def flush_for_hard_exit(exit_code: int | None = None) -> None:
     """Drain telemetry before an `os._exit`, which skips atexit handlers.
+
+    ``os._exit`` also skips ``track_command``'s ``finally``, so given the code
+    the process is about to exit with, every command still running is finished
+    with it first; without it, a background ``comfy launch`` that started fine
+    would have a start row and no finish, the same as one that was killed.
 
     `comfy launch` terminates through `os._exit` on both its background-success
     and failure paths, so `_flush_all_providers` never runs there. That was
@@ -892,6 +1064,16 @@ def flush_for_hard_exit() -> None:
     best-effort: nothing it does may keep the caller from exiting.
     """
     try:
+        if exit_code is not None:
+            for run in reversed(list(_open_commands)):
+                if exit_code < 0:
+                    # A subprocess return code: the child `comfy launch` waited on
+                    # was killed by signal -code (`comfy stop` sends SIGKILL), which
+                    # is how the server ended, not a failure of the launcher.
+                    run[0].update(outcome="killed", signal=-exit_code)
+                else:
+                    _record_exit(run[0], exit_code)
+                _finish(run)
         _flush_all_providers()
     except BaseException:  # noqa: BLE001  # pragma: no cover - defensive
         pass

@@ -20,6 +20,7 @@ The tests cover:
 from __future__ import annotations
 
 import io
+import itertools
 import json
 import os
 import sys
@@ -51,13 +52,30 @@ def ndjson_renderer():
     reset_renderer_for_testing()
 
 
+@pytest.fixture(autouse=True)
+def local_preflight_catalog(monkeypatch):
+    """Keep event/queue tests independent of any real server on localhost.
+
+    Validation still runs against complete schemas. Tests for conversion HTTP
+    and deliberately invalid catalogs override their specific boundary below.
+    """
+    from copy import deepcopy
+
+    monkeypatch.setattr("comfy_cli.command.run._fetch_object_info", lambda *a, **k: deepcopy(OBJECT_INFO))
+
+    def unexpected_catalog_request(*args, **kwargs):
+        pytest.fail("unexpected real catalog request; mock the specific object_info transport")
+
+    monkeypatch.setattr("comfy_cli.http._PLAIN_OPENER.open", unexpected_catalog_request)
+
+
 @pytest.fixture
 def simple_workflow():
     return {
         "1": {
-            "class_type": "EmptyLatentImage",
-            "inputs": {"width": 64, "height": 64, "batch_size": 1},
-            "_meta": {"title": "Latent"},
+            "class_type": "EmptyImage",
+            "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0},
+            "_meta": {"title": "Image"},
         },
         "2": {
             "class_type": "SaveImage",
@@ -301,6 +319,70 @@ class TestSuccessfulRun:
         assert env["data"]["status"] == "queued"
         assert env["data"]["prompt_id"] == "p123"
 
+    def test_queued_envelope_field_set_local_golden(self, workflow_file, capsys):
+        """Golden field set *and order* of the local async ``queued`` envelope.
+        The shared ``_announce_async_queued`` helper must never
+        silently drop/add/reorder a key — the envelope is a public agent-mode
+        JSON contract. Local carries ``host``/``port`` as its locator."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch("comfy_cli.command.run._spawn_watcher", return_value=True),
+            patch("comfy_cli.jobs_state.write", return_value="/tmp/state.json"),
+        ):
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "pL"}).encode()
+            lines, exit_code = _run_execute_capture(workflow_file, capsys, wait=False)
+        assert exit_code == 0
+        data = _envelope(lines)["data"]
+        assert list(data) == [
+            "workflow",
+            "status",
+            "prompt_id",
+            "client_id",
+            "outputs",
+            "elapsed_seconds",
+            "host",
+            "port",
+            "state_file",
+            "watcher_spawned",
+        ]
+        assert data["status"] == "queued"
+        assert data["host"] == "127.0.0.1"
+        assert data["port"] == 8188
+        assert data["state_file"] == "/tmp/state.json"
+        assert data["watcher_spawned"] is True
+        assert data["outputs"] == []
+        assert data["elapsed_seconds"] is None
+
+    def test_queued_envelope_field_set_cloud_golden(self, monkeypatch, workflow_file, capsys):
+        """Golden field set *and order* of the cloud non-wait ``queued``
+        envelope. Cloud carries ``base_url`` (not ``host``/``port``) as its
+        locator, and — like local — ``watcher_spawned``: docs/json-output.md
+        documents the async envelope as the same on both targets,
+        ``watcher_spawned`` included."""
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit=_FakeSubmit(prompt_id="pC")))
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+        assert exit_code == 0
+        data = _envelope(lines)["data"]
+        assert list(data) == [
+            "workflow",
+            "status",
+            "prompt_id",
+            "client_id",
+            "outputs",
+            "elapsed_seconds",
+            "base_url",
+            "state_file",
+            "watcher_spawned",
+        ]
+        assert data["status"] == "queued"
+        assert data["prompt_id"] == "pC"
+        assert data["base_url"] == _FakeTarget.base_url
+        assert data["state_file"] == "/tmp/state.json"
+        assert data["watcher_spawned"] is True
+        assert data["outputs"] == []
+        assert data["elapsed_seconds"] is None
+
     def test_envelope_after_success(self, workflow_file, capsys):
         """Mocked WS flow → queued + executing/executed/output events + ok envelope."""
         with (
@@ -459,8 +541,8 @@ class TestQueuedEventShape:
         nodes = queued["nodes"]
         assert len(nodes) == 2
         by_id = {n["node_id"]: n for n in nodes}
-        assert by_id["1"]["class_type"] == "EmptyLatentImage"
-        assert by_id["1"]["title"] == "Latent"  # _meta.title wins
+        assert by_id["1"]["class_type"] == "EmptyImage"
+        assert by_id["1"]["title"] == "Image"  # _meta.title wins
         assert by_id["2"]["class_type"] == "SaveImage"
         assert by_id["2"]["title"] == "Save"
 
@@ -479,15 +561,39 @@ class TestWebSocketEvents:
             return _run_execute_capture(workflow_file, capsys)
 
     def test_websocket_timeout(self, workflow_file, capsys):
-        lines, exit_code = self._run_with_ws_messages(
-            workflow_file,
-            WebSocketTimeoutException("timed out"),
-            capsys,
-        )
+        # Advance a fake clock past the 30s budget on the first poll so the
+        # wall-clock backstop fires without a real 30s wait.
+        fake_time = MagicMock()
+        fake_time.time.side_effect = itertools.count(1000.0, 31.0).__next__
+        fake_time.monotonic.side_effect = itertools.count(1000.0, 31.0).__next__
+        with patch("comfy_cli.command.run.execution.time", fake_time):
+            lines, exit_code = self._run_with_ws_messages(
+                workflow_file,
+                WebSocketTimeoutException("timed out"),
+                capsys,
+            )
         assert exit_code == 1
         env = _envelope(lines)
         assert env["error"]["code"] == "ws_timeout"
         assert env["error"]["details"]["timeout"] == 30
+        # A job was queued, so the hint names it for `comfy jobs status`.
+        assert "comfy jobs status p" in env["error"]["hint"]
+
+    def test_connect_timeout_hint_names_no_job(self, workflow_file, capsys):
+        """A timeout raised by the websocket handshake fires before anything is
+        queued, so the hint must not send the user to a job that doesn't exist."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open"),
+            patch("comfy_cli.command.run.WebSocket") as MockWs,
+        ):
+            MockWs.return_value.connect.side_effect = WebSocketTimeoutException("handshake timed out")
+            lines, exit_code = _run_execute_capture(workflow_file, capsys)
+        assert exit_code == 1
+        env = _envelope(lines)
+        assert env["error"]["code"] == "ws_timeout"
+        assert "prompt_id" not in env["error"]["details"]
+        assert "jobs status" not in env["error"]["hint"]
 
     def test_connection_lost_websocket(self, workflow_file, capsys):
         lines, exit_code = self._run_with_ws_messages(
@@ -532,7 +638,7 @@ class TestWebSocketEvents:
                     "data": {
                         "prompt_id": "p",
                         "node_id": "1",
-                        "node_type": "EmptyLatentImage",
+                        "node_type": "EmptyImage",
                         "exception_type": "RuntimeError",
                         "exception_message": "boom",
                         "traceback": ['  File "x.py"\n', "    raise RuntimeError\n"],
@@ -546,12 +652,12 @@ class TestWebSocketEvents:
         assert any(e["type"] == "execution_error" for e in _events(lines))
         env = _envelope(lines)
         assert env["error"]["code"] == "execution_error"
-        assert env["error"]["message"] == "EmptyLatentImage (node 1): boom"
+        assert env["error"]["message"] == "EmptyImage (node 1): boom"
         details = env["error"]["details"]
         assert details["node_id"] == "1"
-        assert details["class_type"] == "EmptyLatentImage"
+        assert details["class_type"] == "EmptyImage"
         assert details["exception_type"] == "RuntimeError"
-        assert details["title"] == "Latent"  # from _meta.title
+        assert details["title"] == "Image"  # from _meta.title
         # The envelope carries only the traceback tail; the full traceback
         # stays on the execution_error event.
         assert isinstance(details["traceback_tail"], list)
@@ -569,7 +675,7 @@ class TestWebSocketEvents:
                     "data": {
                         "prompt_id": "p",
                         "node_id": 7,
-                        "node_type": "EmptyLatentImage",
+                        "node_type": "EmptyImage",
                         "exception_type": "RuntimeError",
                         "exception_message": "boom",
                         "traceback": [],
@@ -708,8 +814,8 @@ class TestNodeBookkeeping:
             assert isinstance(ev["node"], str), f"{ev['type']} node is {type(ev['node']).__name__}"
 
     def test_title_falls_back_to_class_type(self):
-        ex = _make_workflow_execution({"1": {"class_type": "EmptyLatentImage", "inputs": {}}})
-        assert ex.get_node_title("1") == "EmptyLatentImage"
+        ex = _make_workflow_execution({"1": {"class_type": "EmptyImage", "inputs": {}}})
+        assert ex.get_node_title("1") == "EmptyImage"
 
     def test_title_falls_back_to_node_id_for_unknown(self):
         ex = _make_workflow_execution({})
@@ -720,10 +826,10 @@ UI_WORKFLOW = {
     "nodes": [
         {
             "id": 1,
-            "type": "EmptyLatentImage",
+            "type": "EmptyImage",
             "inputs": [],
-            "outputs": [{"name": "LATENT", "type": "LATENT", "links": [10]}],
-            "widgets_values": [64, 64, 1],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [10]}],
+            "widgets_values": [64, 64, 1, 0],
             "mode": 0,
         },
         {
@@ -738,17 +844,26 @@ UI_WORKFLOW = {
 }
 
 OBJECT_INFO = {
-    "EmptyLatentImage": {
+    "EmptyImage": {
         "input": {
             "required": {
                 "width": ["INT", {"default": 512}],
                 "height": ["INT", {"default": 512}],
                 "batch_size": ["INT", {"default": 1}],
+                "color": ["INT", {"default": 0}],
             }
         },
-        "input_order": {"required": ["width", "height", "batch_size"]},
+        "input_order": {"required": ["width", "height", "batch_size", "color"]},
+        "output": ["IMAGE"],
+        "output_name": ["IMAGE"],
         "output_node": False,
-        "display_name": "Empty Latent Image",
+        "display_name": "Empty Image",
+    },
+    "SaveImage": {
+        "input": {"required": {"filename_prefix": ["STRING", {"default": "ComfyUI"}], "images": ["IMAGE"]}},
+        "input_order": {"required": ["filename_prefix", "images"]},
+        "output": [],
+        "output_node": True,
     },
     "PreviewImage": {
         "input": {"required": {"images": ["IMAGE"]}},
@@ -881,7 +996,7 @@ class TestPromptPreviewAlwaysEmitted:
         assert types[0] == "prompt_preview"
         assert "queued" in types
         assert types.index("prompt_preview") < types.index("queued")
-        assert _events(lines)[0]["prompt"]["1"]["class_type"] == "EmptyLatentImage"
+        assert _events(lines)[0]["prompt"]["1"]["class_type"] == "EmptyImage"
 
     def test_ui_input_emits_converted_then_prompt_preview_then_queued(self, ui_workflow_file, capsys):
         with (
@@ -946,7 +1061,7 @@ class TestPrintPrompt:
         assert [e["type"] for e in _events(lines)] == ["prompt_preview"]
         preview = _events(lines)[0]
         assert preview["schema"] == "event/1"
-        assert preview["prompt"]["1"]["class_type"] == "EmptyLatentImage"
+        assert preview["prompt"]["1"]["class_type"] == "EmptyImage"
         env = _envelope(lines)
         assert env["ok"] is True
         assert env["data"]["status"] == "preview"
@@ -1003,7 +1118,7 @@ class TestPrintPrompt:
         out, _err = capsys.readouterr()
         parsed = json.loads(out)
         assert "1" in parsed
-        assert parsed["1"]["class_type"] == "EmptyLatentImage"
+        assert parsed["1"]["class_type"] == "EmptyImage"
 
     def test_print_prompt_does_not_post_when_workflow_invalid(self, capsys):
         # Pre-flight failures (workflow_not_found, workflow_not_api_format)
@@ -1151,10 +1266,10 @@ class TestNodeCachedIntegration:
 
         cached_events = [e for e in _events(lines) if e["type"] == "execution_cached"]
         assert len(cached_events) == 2
-        # Node 1 has _meta.title="Latent"; class_type=EmptyLatentImage
+        # Node 1 has _meta.title="Image"; class_type=EmptyImage
         n1 = next(e for e in cached_events if e["node"] == "1")
-        assert n1["class_type"] == "EmptyLatentImage"
-        assert n1["title"] == "Latent"
+        assert n1["class_type"] == "EmptyImage"
+        assert n1["title"] == "Image"
         # Node 2 has _meta.title="Save"; class_type=SaveImage
         n2 = next(e for e in cached_events if e["node"] == "2")
         assert n2["class_type"] == "SaveImage"
@@ -1291,9 +1406,9 @@ class TestErrorPathCoverage:
     def _make_workflow(self):
         return {
             "1": {
-                "class_type": "EmptyLatentImage",
-                "inputs": {"width": 64, "height": 64, "batch_size": 1},
-                "_meta": {"title": "Latent"},
+                "class_type": "EmptyImage",
+                "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0},
+                "_meta": {"title": "Image"},
             },
             "2": {
                 "class_type": "SaveImage",
@@ -1310,10 +1425,10 @@ class TestErrorPathCoverage:
             "nodes": [
                 {
                     "id": 1,
-                    "type": "EmptyLatentImage",
+                    "type": "EmptyImage",
                     "inputs": [],
                     "outputs": [],
-                    "widgets_values": [64, 64, 1],
+                    "widgets_values": [64, 64, 1, 0],
                     "mode": 0,
                 }
             ],
@@ -1325,9 +1440,10 @@ class TestErrorPathCoverage:
         try:
             with (
                 patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-                patch("comfy_cli.http._AUTHED_OPENER.open", side_effect=TimeoutError("timed out")),
+                patch("comfy_cli.http._PLAIN_OPENER.open", side_effect=TimeoutError("timed out")) as mock_open,
             ):
                 lines, exit_code = _run_execute_capture(path, capsys)
+            mock_open.assert_called_once_with("http://127.0.0.1:8188/object_info", timeout=30)
             assert _envelope(lines)["error"]["code"] == "connection_error"
         finally:
             os.unlink(path)
@@ -1338,10 +1454,10 @@ class TestErrorPathCoverage:
             "nodes": [
                 {
                     "id": 1,
-                    "type": "EmptyLatentImage",
+                    "type": "EmptyImage",
                     "inputs": [],
                     "outputs": [],
-                    "widgets_values": [64, 64, 1],
+                    "widgets_values": [64, 64, 1, 0],
                     "mode": 0,
                 }
             ],
@@ -1787,7 +1903,7 @@ class TestCloudStreamContract:
         assert isinstance(queued["client_id"], str) and queued["client_id"]
         assert queued["validation_warnings"] == []
         assert queued["nodes"] == [
-            {"node_id": "1", "class_type": "EmptyLatentImage", "title": "Latent"},
+            {"node_id": "1", "class_type": "EmptyImage", "title": "Image"},
             {"node_id": "2", "class_type": "SaveImage", "title": "Save"},
         ]
         assert queued["base_url"] == "https://api.comfy.org"
@@ -2007,8 +2123,26 @@ class TestEventSchemaDiscriminatesNodesShape:
             self._validator().validate(regressed)
 
     def test_execution_cached_still_accepts_bare_node_ids(self):
-        """`comfy jobs watch --where cloud` emits plain id strings here."""
+        """Legacy shape: comfy-cli 1.16.0's `comfy jobs watch` emitted one
+        `execution_cached` carrying a plain array of node ids. Nothing emits it
+        any more — watch now fans out one event per node, matching `comfy run` —
+        but a stream captured from 1.16.0 must keep validating."""
         self._validator().validate({"schema": "event/1", "type": "execution_cached", "nodes": ["1", "2"]})
+
+    def test_execution_cached_per_node_shape_validates(self):
+        """The shape BOTH streams emit today — one event, one `node`."""
+        self._validator().validate(
+            {
+                "schema": "event/1",
+                "type": "execution_cached",
+                "node": "1",
+                "title": "Latent",
+                "class_type": "EmptyLatentImage",
+                "prompt_id": "p",
+            }
+        )
+        # `comfy jobs watch` has no workflow map, so it omits title/class_type.
+        self._validator().validate({"schema": "event/1", "type": "execution_cached", "node": "1", "prompt_id": "p"})
 
 
 class TestMalformedRejectionPayloadStillYieldsAnEnvelope:
@@ -2176,6 +2310,190 @@ class TestQueuedFollowsStatePersistence:
         assert exit_code == 0
         assert ("queued_emit",) in log
         assert log.index(("state_write",)) < log.index(("queued_emit",))
+
+
+class TestStateWriteFailureIsNotADisconnect:
+    """A local filesystem failure writing the job-state file must never be
+    reported to the caller as a lost server connection.
+
+    The state file lives under `constants.DEFAULT_CONFIG`, which resolves from
+    `expanduser("~")`. When that root is unwritable — a launcher that does not
+    pass through the environment variable the platform expands `~` from, a
+    sandboxed or read-only home, a full disk — `jobs_state.write` raises an
+    `OSError` (ENOENT/EACCES). The async submit branch called it raw inside the
+    try whose handler is `except (WebSocketException, ConnectionError,
+    OSError)`, so a purely local write error came back to the caller as
+    `ws_disconnected` with a "re-run the command" hint. The server had accepted
+    the prompt every time, so a caller that obeys the hint queues a second GPU
+    job for one request — and an automated caller obeys it every time.
+
+    The fix routes both async call sites through the file's existing
+    best-effort `_write_state` wrapper, so a submit the server accepted still
+    reports `queued`, just with `state_file: null`.
+    """
+
+    # Where the `OSError` surfaces, outermost call last. Patching each in turn
+    # pins the behaviour on the *handler*, not on one mock shape.
+    #
+    # Each value builds a FRESH exception per raise. A shared instance would
+    # pin its `__traceback__` — and so every frame it passed through — on a
+    # class attribute for the rest of the session; this suite has already been
+    # OOM-killed once by retained frames (see `_mock_exec` in `test_run.py`).
+    FAILURE_POINTS = {
+        # `state_dir()`'s mkdir under an unwritable config root — the shape
+        # this was reported as in the field.
+        "state_dir": lambda: FileNotFoundError(2, "No such file or directory"),
+        # The atomic write itself, where the directory lookup happened to work
+        # but the file did not (sandboxed/read-only root).
+        "atomic_write_text": lambda: PermissionError(13, "Permission denied"),
+        # `jobs_state.write` whole, which is what the call site actually sees.
+        "write": lambda: OSError(5, "Input/output error"),
+    }
+
+    @staticmethod
+    def _break_state_writes(monkeypatch, failure_point):
+        from comfy_cli import jobs_state as jobs_state_mod
+
+        make_exc = TestStateWriteFailureIsNotADisconnect.FAILURE_POINTS[failure_point]
+
+        def _boom(*_a, **_k):
+            raise make_exc()
+
+        monkeypatch.setattr(jobs_state_mod, failure_point, _boom)
+
+    @staticmethod
+    def _assert_queued_without_disconnect(lines, exit_code, prompt_id):
+        assert exit_code == 0, "a local state-file failure must not fail an accepted submit"
+        env = _envelope(lines)
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["status"] == "queued"
+        assert data["prompt_id"] == prompt_id
+        # The visible consequences of the swallowed failure: no durable record
+        # to point the caller at, and no watcher claimed to be keeping one
+        # fresh. `watcher_spawned: true` here would tell a consumer something
+        # is updating a file that does not exist.
+        assert data["state_file"] is None
+        assert data["watcher_spawned"] is False
+        # (a) nothing told the caller the server went away, and (b) nothing
+        # told it to re-run — that hint is what multiplied the GPU jobs.
+        blob = json.dumps(lines)
+        assert "ws_disconnected" not in blob
+        assert "re-run the command" not in blob
+        # (c) the caller still gets the whole documented async stream.
+        assert [ln["type"] for ln in lines] == ["prompt_preview", "queued", "envelope"]
+
+    @pytest.mark.parametrize("failure_point", sorted(FAILURE_POINTS))
+    def test_local_async(self, failure_point, monkeypatch, workflow_file, capsys):
+        self._break_state_writes(monkeypatch, failure_point)
+        spawned = []
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch(
+                "comfy_cli.command.run._spawn_watcher",
+                side_effect=lambda pid, **_k: spawned.append(pid) or True,
+            ),
+        ):
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps(
+                {"prompt_id": "statefail-local"}
+            ).encode()
+            lines, exit_code = _run_execute_capture(workflow_file, capsys, wait=False)
+        self._assert_queued_without_disconnect(lines, exit_code, "statefail-local")
+        # Not merely reported as unspawned — never launched. `_watch-job` opens
+        # with `jobs_state.read`, so it would exit immediately or die on the
+        # same error, and on cloud it inherits credentials while doing so.
+        assert spawned == [], "no record to update, so no watcher should have been launched"
+
+    @pytest.mark.parametrize("failure_point", sorted(FAILURE_POINTS))
+    def test_local_wait_still_completes(self, failure_point, monkeypatch, workflow_file, capsys):
+        """`--wait` writes twice — at submit and at completion — and both already
+        went through `_write_state`. Pinned here because the documented envelope
+        differs from the async one: this path runs to completion in the
+        foreground, so it ends `completed` with its outputs, not `queued`."""
+        self._break_state_writes(monkeypatch, failure_point)
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch("comfy_cli.command.run.WebSocket") as MockWs,
+        ):
+            # "p" is what `_local_ws_that_finishes` stamps on its `executing`
+            # frame; any other id leaves the recv loop waiting forever.
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
+            _local_ws_that_finishes(MockWs)
+            lines, exit_code = _run_execute_capture(workflow_file, capsys, wait=True)
+
+        assert exit_code == 0
+        data = _envelope(lines)["data"]
+        # NOT `queued`: this path ran to completion in the foreground, so the
+        # lost record costs the caller the record and nothing else.
+        assert data["status"] == "completed"
+        assert data["state_file"] is None
+        assert data["prompt_id"] == "p"
+        blob = json.dumps(lines)
+        assert "ws_disconnected" not in blob
+        assert "re-run the command" not in blob
+
+    @pytest.mark.parametrize(
+        ("evil", "expect"),
+        [("x[/]y", "[/]"), ("x[bold red]y[/bold red]", "[bold red]")],
+        ids=["stray_closing_tag", "well_formed_tag"],
+    )
+    def test_a_markup_bearing_prompt_id_does_not_abort_the_pretty_panel(
+        self, evil, expect, monkeypatch, workflow_file, capsys
+    ):
+        """`prompt_id` reaches the pretty queued panel TWICE: on its own line,
+        and inside `watch_command`, which both callers build as
+        `comfy jobs watch <prompt_id>`.
+
+        Reachable from this PR's change: an id carrying markup also fails
+        `_SAFE_PROMPT_ID`, so it used to stop at the submit-time write.
+
+        Two payloads, because they fail differently. A stray CLOSING tag raises
+        `MarkupError` — a crash after the server accepted the job. A WELL-FORMED
+        tag raises nothing at all and simply lets the server restyle the user's
+        terminal, which is the quieter half of the same hole.
+        """
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        set_renderer(Renderer(mode=OutputMode.PRETTY, command="run"))
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch("comfy_cli.command.run._spawn_watcher", return_value=True),
+            patch("comfy_cli.command.run._tail_state_file"),
+        ):
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": evil}).encode()
+            execute(workflow_file, host="127.0.0.1", port=8188, wait=False, verbose=False, timeout=30)
+        combined = "".join(capsys.readouterr())
+
+        assert "comfy jobs watch" in combined, "the panel must still render"
+        # Escaped means SHOWN LITERALLY, so PRESENCE is the proof: an
+        # interpreted tag would have been consumed and absent from the text.
+        # Twice, because both sinks carry the id.
+        assert combined.count(expect) >= 2, f"{expect!r} should appear inert on both lines, got:\n{combined}"
+
+    @pytest.mark.parametrize("failure_point", sorted(FAILURE_POINTS))
+    def test_cloud_async(self, failure_point, monkeypatch, workflow_file, capsys):
+        """Same shared helper, the other call site. `execute_cloud`'s non-wait
+        branch has no broad handler at all, so there the raw write turned an
+        already-accepted — and billable — cloud job into an uncaught
+        traceback."""
+        from comfy_cli import jobs_state as jobs_state_mod
+        from comfy_cli.command import run as run_pkg
+
+        real_write = jobs_state_mod.write
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit=_FakeSubmit(prompt_id="statefail-cloud")))
+        # The stubs no-op `jobs_state.write`; restore the real one so the
+        # failure injected below is actually reached.
+        monkeypatch.setattr(jobs_state_mod, "write", real_write)
+        self._break_state_writes(monkeypatch, failure_point)
+        spawned = []
+        monkeypatch.setattr(run_pkg, "_spawn_watcher", lambda pid, **_k: spawned.append(pid) or True)
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+        self._assert_queued_without_disconnect(lines, exit_code, "statefail-cloud")
+        assert spawned == [], "a cloud watcher inherits credentials; do not launch one with no record"
 
 
 class TestBrokenPipeAtTheQueuedEmit:
@@ -2393,3 +2711,886 @@ class TestErrorEnvelopeCarriesRoutedTarget:
         assert result.exit_code == 1
         assert second["error"]["code"] == "where_invalid"
         assert second["where"] is None
+
+
+class TestCloudRateLimited:
+    """A 429 from Comfy Cloud is throttling, not a rejected workflow.
+
+    The submit path used to report it as `cloud_http_error` with the hint
+    "check the workflow is valid and the cloud server has the required nodes",
+    sending the agent off to rewrite a valid workflow.
+    """
+
+    def test_submit_429_is_cloud_rate_limited(self, monkeypatch, workflow_file, capsys):
+        from comfy_cli.comfy_client import HTTPError
+
+        exc = HTTPError(429, "Too Many Requests", '{"error":{"message":"slow down"}}', retry_after=12.0)
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=exc))
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        assert exit_code == 1
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_rate_limited"
+        assert err["details"]["status"] == 429
+        assert err["details"]["retry_after"] == 12
+        assert "slow down" in err["details"]["body"]
+        assert "workflow is valid" not in err["hint"]
+        assert "retry" in err["hint"].lower()
+
+    def test_submit_429_hint_checks_for_the_job_before_resubmitting(self, monkeypatch, workflow_file, capsys):
+        """A 429 does not prove the submit had no effect. The hint must not say
+        "not rejected" / "retry unchanged"; it sends the caller to the job list
+        first, so a submit that did go through is not repeated."""
+        from comfy_cli.comfy_client import HTTPError
+
+        exc = HTTPError(429, "Too Many Requests", "", retry_after=12.0)
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=exc))
+        lines, _ = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        hint = _envelope(lines)["error"]["hint"]
+        assert "comfy jobs ls --where cloud" in hint
+        assert "not rejected" not in hint
+        assert "unchanged" not in hint
+        assert "12s" in hint
+
+    def test_submit_429_without_retry_after_omits_it(self, monkeypatch, workflow_file, capsys):
+        from comfy_cli.comfy_client import HTTPError
+
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=HTTPError(429, "Too Many Requests")))
+        lines, _ = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_rate_limited"
+        assert "retry_after" not in err["details"]
+
+    def test_submit_429_plan_refusal_is_cloud_payment_required(self, monkeypatch, workflow_file, capsys):
+        """The cloud answers a submit the account's plan does not allow with a
+        429 and a typed body. That is a refusal, not throttling: the envelope
+        says so and carries the server's message, and does not send the caller
+        to wait, retry, or look for a job that was never queued."""
+        from comfy_cli.comfy_client import HTTPError
+
+        body = '{"error":{"message":"You\'ve used all your free generations. Upgrade to keep creating.","type":"FREE_TIER_EXHAUSTED"}}'
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=HTTPError(429, "Too Many Requests", body)))
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        assert exit_code == 1
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_payment_required"
+        assert "used all your free generations" in err["message"]
+        assert err["details"]["reason"] == "FREE_TIER_EXHAUSTED"
+        assert "comfy jobs ls" not in err["hint"]
+        assert "retry" in err["hint"].lower()
+
+    def test_submit_402_is_cloud_payment_required(self, monkeypatch, workflow_file, capsys):
+        """The cloud's plan refusal on submit is a 402 with a typed body."""
+        from comfy_cli.comfy_client import HTTPError
+
+        body = '{"error":{"message":"A cloud subscription is required to queue workflows.","type":"CLOUD_SUBSCRIPTION_REQUIRED"}}'
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=HTTPError(402, "Payment Required", body)))
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        assert exit_code == 1
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_payment_required"
+        assert "subscription is required" in err["message"]
+        assert err["details"]["reason"] == "CLOUD_SUBSCRIPTION_REQUIRED"
+        assert err["details"]["status"] == 402
+        assert "comfy jobs ls" not in err["hint"]
+
+    def test_submit_403_scope_detected_past_the_rendered_body_cap(self, monkeypatch, workflow_file, capsys):
+        """Detection reads the full body; only ``details.body`` is capped."""
+        import json as _json
+
+        from comfy_cli.comfy_client import HTTPError
+
+        body = _json.dumps({"padding": "x" * 3000, "error": "insufficient_scope: comfy-cloud:agent:write"})
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=HTTPError(403, "Forbidden", body)))
+        lines, _ = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_unauthorized"
+        assert err["details"]["required_scope"] == "comfy-cloud:agent:write"
+        assert len(err["details"]["body"]) == 2000
+
+    @pytest.mark.parametrize("status", [400, 500, 503])
+    def test_submit_other_statuses_keep_cloud_http_error(self, monkeypatch, workflow_file, capsys, status):
+        from comfy_cli.comfy_client import HTTPError
+
+        exc = HTTPError(status, "nope", "body", retry_after=5.0)
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=exc))
+        lines, _ = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_http_error"
+        assert err["hint"] == "check the workflow is valid and the cloud server has the required nodes"
+        assert err["details"] == {"status": status, "body": "body"}
+
+    def test_poll_429_is_cloud_rate_limited(self, monkeypatch, workflow_file, capsys):
+        from comfy_cli.comfy_client import HTTPError
+
+        base = _fake_client()
+
+        class Throttled(base):
+            def wait_for_completion(self, prompt_id, **k):
+                raise HTTPError(429, "Too Many Requests", retry_after=3.0)
+
+        _install_cloud_stubs(monkeypatch, client_cls=Throttled)
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=True, timeout=5)
+
+        assert exit_code == 1
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_rate_limited"
+        assert err["details"]["prompt_id"] == "cloud-pid"
+        assert err["details"]["retry_after"] == 3
+
+    def test_poll_500_keeps_cloud_http_error(self, monkeypatch, workflow_file, capsys):
+        from comfy_cli.comfy_client import HTTPError
+
+        base = _fake_client()
+
+        class Broken(base):
+            def wait_for_completion(self, prompt_id, **k):
+                raise HTTPError(500, "Internal Server Error")
+
+        _install_cloud_stubs(monkeypatch, client_cls=Broken)
+        lines, _ = _cloud_capture(capsys, workflow_file, wait=True, timeout=5)
+
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_http_error"
+        assert err["details"] == {"status": 500, "prompt_id": "cloud-pid"}
+
+
+class TestPollRateLimitedPointsAtTheSubmittedJob:
+    """A 429 while polling happens AFTER the prompt was accepted. "Retry it
+    unchanged" would re-run `comfy run`, submitting a second cloud job and
+    spending again — the hint must send the caller to the existing job."""
+
+    def test_poll_429_hint_watches_the_job_instead_of_resubmitting(self, monkeypatch, workflow_file, capsys):
+        from comfy_cli.comfy_client import HTTPError
+
+        base = _fake_client()
+
+        class Throttled(base):
+            def wait_for_completion(self, prompt_id, **k):
+                raise HTTPError(429, "Too Many Requests", retry_after=3.0)
+
+        _install_cloud_stubs(monkeypatch, client_cls=Throttled)
+        lines, _ = _cloud_capture(capsys, workflow_file, wait=True, timeout=5)
+
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_rate_limited"
+        assert "comfy jobs watch cloud-pid --where cloud" in err["hint"]
+        assert "retry it unchanged" not in err["hint"]
+        assert "3s" in err["hint"]
+
+    def test_documented_poll_guidance_targets_the_cloud(self):
+        """Without `--where cloud`, `comfy jobs watch` follows the default
+        (often local) target and cannot see the submitted cloud job."""
+        from pathlib import Path
+
+        doc = (Path(__file__).resolve().parents[3] / "docs" / "json-output.md").read_text()
+        row = next(line for line in doc.splitlines() if line.startswith("| `cloud_rate_limited`"))
+        assert "comfy jobs watch <prompt_id> --where cloud" in row
+
+
+class TestPollRateLimitedIsNotTerminal:
+    """A 429 while `--wait` polls says nothing about the job, which was already
+    accepted and may still be running. The record must stay non-terminal (so a
+    later `comfy jobs watch` / status poll can finish it and clear the error),
+    and the recorded error keeps the prompt id and Retry-After."""
+
+    def test_poll_429_leaves_the_record_non_terminal(self, monkeypatch, workflow_file, capsys):
+        from comfy_cli import jobs_state as jobs_state_mod
+        from comfy_cli.comfy_client import HTTPError
+
+        base = _fake_client()
+
+        class Throttled(base):
+            def wait_for_completion(self, prompt_id, **k):
+                raise HTTPError(429, "Too Many Requests", retry_after=3.0)
+
+        _install_cloud_stubs(monkeypatch, client_cls=Throttled)
+        writes: list[tuple] = []
+
+        def fake_write(state):
+            writes.append((state.status, dict(state.error) if state.error else None))
+            return "/tmp/state.json"
+
+        monkeypatch.setattr(jobs_state_mod, "write", fake_write)
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=True, timeout=5)
+
+        assert exit_code == 1
+        assert _envelope(lines)["error"]["code"] == "cloud_rate_limited"
+        status, error = writes[-1]
+        assert status not in jobs_state_mod.TERMINAL_STATUSES
+        assert error["code"] == "cloud_rate_limited"
+        assert error["details"]["prompt_id"] == "cloud-pid"
+        assert error["details"]["retry_after"] == 3
+        assert error["details"]["status"] == 429
+
+    def test_poll_500_still_records_a_terminal_error(self, monkeypatch, workflow_file, capsys):
+        from comfy_cli import jobs_state as jobs_state_mod
+        from comfy_cli.comfy_client import HTTPError
+
+        base = _fake_client()
+
+        class Broken(base):
+            def wait_for_completion(self, prompt_id, **k):
+                raise HTTPError(500, "Internal Server Error")
+
+        _install_cloud_stubs(monkeypatch, client_cls=Broken)
+        writes: list[tuple] = []
+        monkeypatch.setattr(
+            jobs_state_mod, "write", lambda state: writes.append((state.status, state.error)) or "/tmp/state.json"
+        )
+        _cloud_capture(capsys, workflow_file, wait=True, timeout=5)
+
+        status, error = writes[-1]
+        assert status == "error"
+        assert error["code"] == "cloud_http_error"
+
+    def test_poll_403_insufficient_scope_records_the_relogin_reason(self, monkeypatch, workflow_file, capsys):
+        """The job record keeps the same re-login verdict the envelope renders."""
+        from comfy_cli import jobs_state as jobs_state_mod
+        from comfy_cli.comfy_client import HTTPError
+
+        base = _fake_client()
+
+        class Denied(base):
+            def wait_for_completion(self, prompt_id, **k):
+                raise HTTPError(
+                    403,
+                    "Forbidden",
+                    "denied",
+                    www_authenticate=(
+                        'Basic realm="x"',
+                        'Bearer error="insufficient_scope", scope="comfy-cloud:jobs:read"',
+                    ),
+                )
+
+        _install_cloud_stubs(monkeypatch, client_cls=Denied)
+        writes: list[tuple] = []
+        monkeypatch.setattr(
+            jobs_state_mod, "write", lambda state: writes.append((state.status, state.error)) or "/tmp/state.json"
+        )
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=True, timeout=5)
+
+        assert exit_code == 1
+        rendered = _envelope(lines)["error"]
+        status, error = writes[-1]
+        assert status == "error"
+        assert error["code"] == rendered["code"] == "cloud_unauthorized"
+        assert error["details"]["reason"] == "insufficient_scope"
+        assert error["details"]["required_scope"] == "comfy-cloud:jobs:read"
+        assert error["details"]["prompt_id"] == "cloud-pid"
+
+
+# ---------------------------------------------------------------------------
+# --output-node-ids → partial_execution_targets
+# ---------------------------------------------------------------------------
+
+_TARGET_OBJECT_INFO = {
+    "EmptyLatentImage": {"category": "latent", "output_node": False},
+    "SaveImage": {"category": "image", "output_node": True},
+}
+
+
+@pytest.fixture
+def two_output_workflow_file(tmp_path):
+    wf = {
+        "1": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64, "batch_size": 1}},
+        "2": {"class_type": "SaveImage", "inputs": {"filename_prefix": "a", "images": ["1", 0]}},
+        "3": {"class_type": "SaveImage", "inputs": {"filename_prefix": "b", "images": ["1", 0]}},
+    }
+    path = tmp_path / "two_outputs.json"
+    path.write_text(json.dumps(wf))
+    return str(path)
+
+
+_PARTNER_TARGET_OBJECT_INFO = {
+    **_TARGET_OBJECT_INFO,
+    "PaidImageNode": {"category": "partner/image", "output_node": True},
+}
+
+
+@pytest.fixture
+def partner_branch_workflow_file(tmp_path):
+    """Node 2 is a paid partner-API output node; target 3 does not depend on it."""
+    wf = {
+        "1": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64, "batch_size": 1}},
+        "2": {"class_type": "PaidImageNode", "inputs": {"prompt": "x"}},
+        "3": {"class_type": "SaveImage", "inputs": {"filename_prefix": "b", "images": ["1", 0]}},
+    }
+    path = tmp_path / "partner_branch.json"
+    path.write_text(json.dumps(wf))
+    return str(path)
+
+
+def _recording_client(record=None):
+    base = _fake_client(record=record)
+
+    class Recording(base):
+        submit_kwargs: list[dict] = []
+
+        def submit_prompt(self, workflow, client_id, **k):
+            Recording.submit_kwargs.append(k)
+            return super().submit_prompt(workflow, client_id, **k)
+
+    Recording.submit_kwargs = []
+    return Recording
+
+
+class TestOutputNodeIdsCloud:
+    @pytest.fixture(autouse=True)
+    def _no_preflight(self, monkeypatch):
+        from comfy_cli.command import run as run_pkg
+
+        # The CQL preflight is not under test; the minimal object_info here
+        # carries no input specs for it to check against.
+        monkeypatch.setattr(run_pkg, "_preflight_validate", lambda *a, **k: None)
+
+    def test_targets_are_forwarded_to_submit(self, monkeypatch, two_output_workflow_file, capsys):
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_TARGET_OBJECT_INFO)
+        _lines, exit_code = _cloud_capture(
+            capsys, two_output_workflow_file, wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 0
+        assert client.submit_kwargs[-1]["output_node_ids"] == ["3"]
+
+    def test_no_flag_forwards_no_targets(self, monkeypatch, two_output_workflow_file, capsys):
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_TARGET_OBJECT_INFO)
+        _cloud_capture(capsys, two_output_workflow_file, wait=False, timeout=5)
+        assert client.submit_kwargs[-1]["output_node_ids"] is None
+
+    @pytest.mark.parametrize(
+        ("ids", "field", "bad"),
+        [(["9"], "unknown_node_ids", ["9"]), (["1", "2"], "non_output_node_ids", ["1"])],
+    )
+    def test_bad_ids_error_before_submit(self, monkeypatch, two_output_workflow_file, capsys, ids, field, bad):
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_TARGET_OBJECT_INFO)
+        lines, exit_code = _cloud_capture(capsys, two_output_workflow_file, wait=False, timeout=5, output_node_ids=ids)
+        assert exit_code == 1
+        assert client.submitted == []
+        err = _envelope(lines)["error"]
+        assert err["code"] == "invalid_output_node_ids"
+        assert err["details"][field] == bad
+
+    def test_guard_counts_only_the_targets(self, monkeypatch, two_output_workflow_file, capsys):
+        """Node 3 alone was targeted and returned: no `partial_execution`
+        warning, though node 2 (also an output node) produced nothing."""
+        record = {"status": {"status_str": "success"}, "outputs": {"3": {"images": [{"filename": "b.png"}]}}}
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(record), object_info=_TARGET_OBJECT_INFO)
+        lines, exit_code = _cloud_capture(capsys, two_output_workflow_file, wait=True, timeout=5, output_node_ids=["3"])
+        assert exit_code == 0
+        assert _envelope(lines)["data"]["warnings"] == []
+
+    def test_untargeted_run_still_warns_on_the_unreturned_output(self, monkeypatch, two_output_workflow_file, capsys):
+        record = {"status": {"status_str": "success"}, "outputs": {"3": {"images": [{"filename": "b.png"}]}}}
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(record), object_info=_TARGET_OBJECT_INFO)
+        lines, _exit_code = _cloud_capture(capsys, two_output_workflow_file, wait=True, timeout=5)
+        [warning] = _envelope(lines)["data"]["warnings"]
+        assert warning["code"] == "partial_execution"
+        assert "missing_output_node_ids" not in warning
+
+    def test_untargeted_outputs_do_not_stand_in_for_a_missing_target(
+        self, monkeypatch, two_output_workflow_file, capsys
+    ):
+        """A cloud executor that ignores the targets and runs the whole graph
+        can return outputs for node 2 while target 3 produced nothing; that is
+        not a success for 3."""
+        record = {"status": {"status_str": "success"}, "outputs": {"2": {"images": [{"filename": "a.png"}]}}}
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(record), object_info=_TARGET_OBJECT_INFO)
+        lines, exit_code = _cloud_capture(capsys, two_output_workflow_file, wait=True, timeout=5, output_node_ids=["3"])
+        assert exit_code == 0
+        warning, ignored = _envelope(lines)["data"]["warnings"]
+        assert warning["code"] == "partial_execution"
+        assert warning["submitted_output_nodes"] == 1
+        assert warning["returned_output_nodes"] == 0
+        assert warning["missing_output_node_ids"] == ["3"]
+        # Node 2 is outside target 3's subgraph, so the server ran more than asked.
+        assert ignored["code"] == "partial_execution_targets_ignored"
+        assert ignored["untargeted_output_node_ids"] == ["2"]
+
+    def test_cached_preview_from_an_untargeted_intermediate_node_is_not_a_whole_graph_run(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """At the end of a run ComfyUI replays cached previews of
+        intermediate-output nodes (Crop Image, Painter, ...) even outside the
+        targets' subgraph. Those nodes are not output nodes, so their preview
+        does not mean the server ran the whole graph."""
+        wf = {
+            "1": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64, "batch_size": 1}},
+            "2": {"class_type": "ImageCrop", "inputs": {"image": ["1", 0]}},
+            "3": {"class_type": "SaveImage", "inputs": {"filename_prefix": "b", "images": ["1", 0]}},
+        }
+        path = tmp_path / "intermediate.json"
+        path.write_text(json.dumps(wf))
+        object_info = {**_TARGET_OBJECT_INFO, "ImageCrop": {"category": "image", "output_node": False}}
+        record = {
+            "status": {"status_str": "success"},
+            "outputs": {"2": {"images": [{"filename": "crop.png"}]}, "3": {"images": [{"filename": "b.png"}]}},
+        }
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(record), object_info=object_info)
+        lines, exit_code = _cloud_capture(capsys, str(path), wait=True, timeout=5, output_node_ids=["3"])
+        assert exit_code == 0
+        assert _envelope(lines)["data"]["warnings"] == []
+
+    def test_async_run_records_targets_for_a_later_watch(self, monkeypatch, two_output_workflow_file, capsys):
+        """Without --wait nothing checks the returned outputs at submit time,
+        so the job record keeps the targets and their subgraph for
+        `comfy jobs watch` / `jobs status` to judge, and the queued envelope
+        says the check happens there."""
+        import comfy_cli.jobs_state as jobs_state_mod
+
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
+        written = []
+        monkeypatch.setattr(jobs_state_mod, "write", lambda state: written.append(state) or "/tmp/state.json")
+        lines, exit_code = _cloud_capture(
+            capsys, two_output_workflow_file, wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 0
+        state = written[-1]
+        assert state.output_node_ids == ["3"]
+        # Target 3 and the latent it reads; node 2 is outside the run graph.
+        assert sorted(state.run_graph_node_ids) == ["1", "3"]
+        assert state.output_node_ids_checked is True
+        # Output-class nodes of the whole graph, so `jobs watch` (no node
+        # catalog) can tell an extra output from a replayed intermediate preview.
+        assert sorted(state.graph_output_node_ids) == ["2", "3"]
+        data = _envelope(lines)["data"]
+        assert data["status"] == "queued"
+        assert "comfy jobs watch cloud-pid --where cloud" in data["note"]
+
+    def test_async_run_without_a_state_file_promises_no_watch_check(
+        self, monkeypatch, two_output_workflow_file, capsys
+    ):
+        """When the state file could not be written the targets were never
+        stored, so pointing at `jobs watch` for the check would be false."""
+        import comfy_cli.jobs_state as jobs_state_mod
+
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
+        monkeypatch.setattr(jobs_state_mod, "write", lambda state: None)
+        lines, exit_code = _cloud_capture(
+            capsys, two_output_workflow_file, wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 0
+        assert "note" not in _envelope(lines)["data"]
+
+    def test_async_untargeted_run_records_no_targets(self, monkeypatch, two_output_workflow_file, capsys):
+        import comfy_cli.jobs_state as jobs_state_mod
+
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
+        written = []
+        monkeypatch.setattr(jobs_state_mod, "write", lambda state: written.append(state) or "/tmp/state.json")
+        lines, _exit_code = _cloud_capture(capsys, two_output_workflow_file, wait=False, timeout=5)
+        assert written[-1].output_node_ids is None
+        assert written[-1].run_graph_node_ids is None
+        assert "note" not in _envelope(lines)["data"]
+
+    def test_empty_output_lists_count_as_missing(self, monkeypatch, two_output_workflow_file, capsys):
+        record = {"status": {"status_str": "success"}, "outputs": {"3": {"images": [], "animated": [False]}}}
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(record), object_info=_TARGET_OBJECT_INFO)
+        lines, _exit_code = _cloud_capture(
+            capsys, two_output_workflow_file, wait=True, timeout=5, output_node_ids=["3"]
+        )
+        [warning] = _envelope(lines)["data"]["warnings"]
+        assert warning["code"] == "partial_execution"
+        assert warning["missing_output_node_ids"] == ["3"]
+
+    def test_text_outputs_count_as_returned(self, monkeypatch, two_output_workflow_file, capsys):
+        record = {"status": {"status_str": "success"}, "outputs": {"3": {"text": ["hello"]}}}
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(record), object_info=_TARGET_OBJECT_INFO)
+        lines, _exit_code = _cloud_capture(
+            capsys, two_output_workflow_file, wait=True, timeout=5, output_node_ids=["3"]
+        )
+        assert _envelope(lines)["data"]["warnings"] == []
+
+    def test_missing_target_warns_without_object_info(self, monkeypatch, two_output_workflow_file, capsys):
+        """No catalog: the ids were only checked to exist, but a target that
+        produced nothing still must not pass as a clean success."""
+        record = {"status": {"status_str": "success"}, "outputs": {}}
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(record), object_info=None)
+        lines, exit_code = _cloud_capture(capsys, two_output_workflow_file, wait=True, timeout=5, output_node_ids=["3"])
+        assert exit_code == 0
+        [warning] = _envelope(lines)["data"]["warnings"]
+        assert warning["code"] == "partial_execution"
+        assert warning["missing_output_node_ids"] == ["3"]
+        assert "could not be checked" in warning["message"]
+
+    def test_preflight_sees_only_the_targets_subgraph(self, monkeypatch, two_output_workflow_file, capsys):
+        from comfy_cli.command import run as run_pkg
+
+        seen: dict = {}
+        monkeypatch.setattr(run_pkg, "_preflight_validate", lambda r, wf, *a, **k: seen.setdefault("preflight", wf))
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_TARGET_OBJECT_INFO)
+        _lines, exit_code = _cloud_capture(
+            capsys, two_output_workflow_file, wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 0
+        assert sorted(seen["preflight"]) == ["1", "3"]
+        # The full graph is still what gets submitted.
+        assert sorted(client.submitted[-1][0]) == ["1", "2", "3"]
+
+    def test_spend_gate_covers_untargeted_partner_nodes(self, monkeypatch, partner_branch_workflow_file, capsys):
+        """The server may ignore the targets and run the paid branch, so
+        consent is asked for every partner node that gets submitted."""
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_PARTNER_TARGET_OBJECT_INFO)
+        lines, exit_code = _cloud_capture(
+            capsys, partner_branch_workflow_file, wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 1
+        assert client.submitted == []
+        err = _envelope(lines)["error"]
+        assert err["code"] == "spend_consent_required"
+        assert err["details"]["partner_nodes"] == ["PaidImageNode"]
+
+    def test_allow_spend_submits_with_untargeted_partner_nodes(self, monkeypatch, partner_branch_workflow_file, capsys):
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_PARTNER_TARGET_OBJECT_INFO)
+        _lines, exit_code = _cloud_capture(
+            capsys, partner_branch_workflow_file, wait=False, timeout=5, output_node_ids=["3"], allow_spend=True
+        )
+        assert exit_code == 0
+        assert len(client.submitted) == 1
+
+    def test_print_prompt_shows_targets(self, monkeypatch, two_output_workflow_file, capsys):
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
+        lines, exit_code = _cloud_capture(capsys, two_output_workflow_file, print_prompt=True, output_node_ids=["3"])
+        assert exit_code == 0
+        assert _envelope(lines)["data"]["partial_execution_targets"] == ["3"]
+        preview = next(e for e in _events(lines) if e["type"] == "prompt_preview")
+        assert preview["partial_execution_targets"] == ["3"]
+
+    def test_print_prompt_validates_ids(self, monkeypatch, two_output_workflow_file, capsys):
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
+        lines, exit_code = _cloud_capture(capsys, two_output_workflow_file, print_prompt=True, output_node_ids=["99"])
+        assert exit_code == 1
+        assert _envelope(lines)["error"]["code"] == "invalid_output_node_ids"
+
+
+class TestOutputNodeIdsLocal:
+    def _run(self, workflow_path, capsys, **kwargs):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=_TARGET_OBJECT_INFO),
+            patch("comfy_cli.command.run._preflight_validate"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            mock_exec.outputs = []
+            MockExec.return_value = mock_exec
+            lines, exit_code = _run_execute_capture(workflow_path, capsys, wait=True, **kwargs)
+        return lines, exit_code, MockExec
+
+    def test_targets_reach_the_execution(self, two_output_workflow_file, capsys):
+        _lines, _exit_code, MockExec = self._run(two_output_workflow_file, capsys, output_node_ids=["2"])
+        assert MockExec.call_args.kwargs["output_node_ids"] == ["2"]
+
+    def test_non_output_id_errors_before_submit(self, two_output_workflow_file, capsys):
+        lines, exit_code, MockExec = self._run(two_output_workflow_file, capsys, output_node_ids=["1"])
+        assert exit_code == 1
+        assert not MockExec.called
+        err = _envelope(lines)["error"]
+        assert err["code"] == "invalid_output_node_ids"
+        assert err["details"]["non_output_node_ids"] == ["1"]
+
+    def test_unknown_id_errors_before_submit(self, two_output_workflow_file, capsys):
+        lines, exit_code, MockExec = self._run(two_output_workflow_file, capsys, output_node_ids=["2", "99"])
+        assert exit_code == 1
+        assert not MockExec.called
+        assert _envelope(lines)["error"]["details"]["unknown_node_ids"] == ["99"]
+
+    def test_preflight_and_partner_check_see_only_the_targets_subgraph(self, two_output_workflow_file, capsys):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=_TARGET_OBJECT_INFO),
+            patch("comfy_cli.command.run._preflight_validate") as preflight,
+            patch("comfy_cli.command.run._detect_partner_nodes", return_value=[]) as partner,
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            MockExec.return_value.outputs = []
+            _run_execute_capture(two_output_workflow_file, capsys, wait=True, output_node_ids=["2"])
+        assert sorted(preflight.call_args.args[1]) == ["1", "2"]
+        # The credential check scans the subgraph; the spend gate, the whole
+        # submitted graph.
+        assert [sorted(c.args[0]) for c in partner.call_args_list] == [["1", "2"], ["1", "2", "3"]]
+        assert sorted(MockExec.call_args.args[0]) == ["1", "2", "3"]
+
+    def test_spend_gate_covers_untargeted_partner_nodes(self, partner_branch_workflow_file, capsys):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=_PARTNER_TARGET_OBJECT_INFO),
+            patch("comfy_cli.command.run._preflight_validate"),
+            patch("comfy_cli.command.run._resolve_partner_credential") as resolve,
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            lines, exit_code = _run_execute_capture(
+                partner_branch_workflow_file, capsys, wait=True, output_node_ids=["3"], api_key="k"
+            )
+        assert exit_code == 1
+        assert not MockExec.called
+        assert not resolve.called
+        err = _envelope(lines)["error"]
+        assert err["code"] == "spend_consent_required"
+        assert err["details"]["partner_nodes"] == ["PaidImageNode"]
+
+    def test_allow_spend_needs_no_credential_for_an_untargeted_partner_node(self, partner_branch_workflow_file, capsys):
+        """Consent covers the whole graph, but the credential check stays on
+        the nodes that run: no credential is resolved for the skipped branch."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=_PARTNER_TARGET_OBJECT_INFO),
+            patch("comfy_cli.command.run._preflight_validate"),
+            patch("comfy_cli.command.run._resolve_partner_credential", return_value=None) as resolve,
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            MockExec.return_value.outputs = []
+            MockExec.return_value.borrowed_client_id = False
+            _lines, exit_code = _run_execute_capture(
+                partner_branch_workflow_file, capsys, wait=True, output_node_ids=["3"], allow_spend=True
+            )
+        assert exit_code == 0
+        assert MockExec.called
+        assert not resolve.called
+        assert MockExec.call_args.kwargs["extra_data"] is None
+
+    def test_print_prompt_shows_targets(self, two_output_workflow_file, capsys):
+        lines, exit_code = _run_execute_capture(
+            two_output_workflow_file, capsys, print_prompt=True, output_node_ids=["2"]
+        )
+        assert exit_code == 0
+        assert _envelope(lines)["data"]["partial_execution_targets"] == ["2"]
+
+    def test_print_prompt_checks_ids(self, two_output_workflow_file, capsys):
+        lines, exit_code = _run_execute_capture(
+            two_output_workflow_file, capsys, print_prompt=True, output_node_ids=["99"]
+        )
+        assert exit_code == 1
+        assert _envelope(lines)["error"]["details"]["unknown_node_ids"] == ["99"]
+
+    def test_execution_gets_the_run_graph_preflight_checked(self, two_output_workflow_file, capsys):
+        """The targets' subgraph is computed once: preflight and the progress
+        count read the same graph, so they cannot disagree."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=_TARGET_OBJECT_INFO),
+            patch("comfy_cli.command.run._preflight_validate") as preflight,
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            MockExec.return_value.outputs = []
+            MockExec.return_value.borrowed_client_id = False
+            _run_execute_capture(two_output_workflow_file, capsys, wait=True, output_node_ids=["2"])
+        assert MockExec.call_args.kwargs["run_graph"] is preflight.call_args.args[1]
+
+    def test_progress_uses_the_given_run_graph(self, two_output_workflow_file):
+        workflow = json.loads(open(two_output_workflow_file).read())
+        run_graph = {"1": workflow["1"], "2": workflow["2"]}
+        with patch("comfy_cli.command.run.execution.target_subgraph") as recompute:
+            ex = WorkflowExecution(
+                workflow, "127.0.0.1", 8188, False, None, False, 5, output_node_ids=["2"], run_graph=run_graph
+            )
+        assert not recompute.called
+        assert ex.remaining_nodes == {"1", "2"}
+        assert ex.total_nodes == 2
+
+    def test_run_graph_without_targets_counts_the_whole_graph(self, two_output_workflow_file):
+        """Without targets the whole graph is submitted, so a stray subgraph
+        must not shrink the progress count."""
+        workflow = json.loads(open(two_output_workflow_file).read())
+        ex = WorkflowExecution(workflow, "127.0.0.1", 8188, False, None, False, 5, run_graph={"2": workflow["2"]})
+        assert ex.remaining_nodes == set(workflow)
+
+    def test_progress_counts_only_the_targets_subgraph(self, two_output_workflow_file):
+        workflow = json.loads(open(two_output_workflow_file).read())
+        ex = WorkflowExecution(workflow, "127.0.0.1", 8188, False, None, False, 5, output_node_ids=["2"])
+        assert ex.remaining_nodes == {"1", "2"}
+        assert ex.total_nodes == 2
+
+    def test_queue_sends_partial_execution_targets(self, simple_workflow):
+        ex = WorkflowExecution(
+            workflow=simple_workflow,
+            host="127.0.0.1",
+            port=8188,
+            verbose=False,
+            progress=None,
+            local_paths=False,
+            timeout=5,
+            output_node_ids=["2"],
+        )
+        with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
+            ex.queue()
+        body = json.loads(mock_open.call_args[0][0].data)
+        assert body["partial_execution_targets"] == ["2"]
+
+    @pytest.mark.parametrize("output_node_ids", [None, []])
+    def test_queue_omits_partial_execution_targets_without_targets(self, simple_workflow, output_node_ids):
+        """Without targets the local body must stay exactly what it was before the flag existed."""
+        ex = WorkflowExecution(
+            workflow=simple_workflow,
+            host="127.0.0.1",
+            port=8188,
+            verbose=False,
+            progress=None,
+            local_paths=False,
+            timeout=5,
+            output_node_ids=output_node_ids,
+        )
+        with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
+            ex.queue()
+        body = json.loads(mock_open.call_args[0][0].data)
+        assert "partial_execution_targets" not in body
+
+
+class TestOutputNodeIdsFlag:
+    def test_parse_splits_strips_and_dedupes(self):
+        from comfy_cli.command.run import parse_output_node_ids
+
+        assert parse_output_node_ids(" 9, 12,,9 ,5:3") == ["9", "12", "5:3"]
+        assert parse_output_node_ids(" , ") == []
+        assert parse_output_node_ids(["9,12", "12", "5"]) == ["9", "12", "5"]
+
+    def test_target_subgraph_follows_input_links(self):
+        from comfy_cli.command.run import target_subgraph
+
+        wf = {
+            "1": {"class_type": "A", "inputs": {"x": 1}},
+            "2": {"class_type": "B", "inputs": {"a": ["1", 0], "pair": ["x", "y"]}},
+            "3": {"class_type": "Save", "inputs": {"b": ["2", 0], "dangling": ["77", 0]}},
+            "4": {"class_type": "Save", "inputs": {"a": ["1", 0]}},
+        }
+        assert sorted(target_subgraph(wf, ["3"])) == ["1", "2", "3"]
+        assert sorted(target_subgraph(wf, ["4"])) == ["1", "4"]
+
+    def test_repeated_flag_merges(self, tmp_path):
+        from typer.testing import CliRunner
+
+        from comfy_cli.cmdline import app
+
+        wf = tmp_path / "wf.json"
+        wf.write_text('{"1": {"class_type": "X", "inputs": {}}}')
+        with patch("comfy_cli.command.run.execute") as mock_execute:
+            result = CliRunner().invoke(
+                app,
+                ["run", "--workflow", str(wf), "--output-node-ids", "9", "--output-node-ids", "12,9"],
+                env={"COMFY_WHERE": "local"},
+            )
+        assert result.exit_code == 0, result.output
+        assert mock_execute.call_args.kwargs["output_node_ids"] == ["9", "12"]
+
+    def test_flag_reaches_execute(self, tmp_path):
+        from typer.testing import CliRunner
+
+        from comfy_cli.cmdline import app
+
+        wf = tmp_path / "wf.json"
+        wf.write_text('{"1": {"class_type": "X", "inputs": {}}}')
+        with patch("comfy_cli.command.run.execute") as mock_execute:
+            result = CliRunner().invoke(
+                app,
+                ["run", "--workflow", str(wf), "--output-node-ids", "1, 2"],
+                env={"COMFY_WHERE": "local"},
+            )
+        assert result.exit_code == 0, result.output
+        assert mock_execute.call_args.kwargs["output_node_ids"] == ["1", "2"]
+
+    def test_flag_absent_passes_none(self, tmp_path):
+        from typer.testing import CliRunner
+
+        from comfy_cli.cmdline import app
+
+        wf = tmp_path / "wf.json"
+        wf.write_text('{"1": {"class_type": "X", "inputs": {}}}')
+        with patch("comfy_cli.command.run.execute") as mock_execute:
+            result = CliRunner().invoke(app, ["run", "--workflow", str(wf)], env={"COMFY_WHERE": "local"})
+        assert result.exit_code == 0, result.output
+        assert mock_execute.call_args.kwargs["output_node_ids"] is None
+
+    def test_empty_flag_errors_without_running(self, tmp_path):
+        from typer.testing import CliRunner
+
+        from comfy_cli.cmdline import app
+
+        wf = tmp_path / "wf.json"
+        wf.write_text('{"1": {"class_type": "X", "inputs": {}}}')
+        with patch("comfy_cli.command.run.execute") as mock_execute:
+            result = CliRunner().invoke(
+                app,
+                ["--json", "run", "--workflow", str(wf), "--output-node-ids", " , "],
+                env={"COMFY_WHERE": "local"},
+            )
+        assert result.exit_code == 1
+        assert not mock_execute.called
+        assert "invalid_output_node_ids" in result.output
+
+
+class TestOutputNodeIdsFullGraphClassCheck:
+    """ComfyUI's validate_prompt rejects an unknown class anywhere in the
+    submitted graph before it looks at partial_execution_targets, so the CLI's
+    preflight must catch it too, not only inside the targets' subgraph."""
+
+    @staticmethod
+    def _workflow(tmp_path, skipped_node):
+        wf = {
+            "1": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64, "batch_size": 1}},
+            "2": skipped_node,
+            "3": {"class_type": "SaveImage", "inputs": {"filename_prefix": "b", "images": ["1", 0]}},
+        }
+        path = tmp_path / "skipped_branch.json"
+        path.write_text(json.dumps(wf))
+        return str(path)
+
+    @pytest.mark.parametrize(
+        ("skipped_node", "code"),
+        [
+            ({"class_type": "NotInstalledNode", "inputs": {}}, "unknown_class_type"),
+            ({"inputs": {}}, "missing_class_type"),
+        ],
+    )
+    def test_cloud_rejects_bad_class_in_skipped_branch_before_submit(
+        self, monkeypatch, tmp_path, capsys, skipped_node, code
+    ):
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_TARGET_OBJECT_INFO)
+        lines, exit_code = _cloud_capture(
+            capsys, self._workflow(tmp_path, skipped_node), wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 1
+        assert client.submitted == []
+        err = _envelope(lines)["error"]
+        assert err["code"] == "workflow_unknown_nodes"
+        assert [(e["node_id"], e["code"]) for e in err["details"]["errors"]] == [("2", code)]
+
+    def test_local_rejects_unknown_class_in_skipped_branch_before_submit(self, tmp_path, capsys):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=_TARGET_OBJECT_INFO),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            lines, exit_code = _run_execute_capture(
+                self._workflow(tmp_path, {"class_type": "NotInstalledNode", "inputs": {}}),
+                capsys,
+                wait=True,
+                output_node_ids=["3"],
+            )
+        assert exit_code == 1
+        assert not MockExec.called
+        assert _envelope(lines)["error"]["code"] == "workflow_unknown_nodes"
+
+    def test_input_errors_in_skipped_branch_still_do_not_block(self, monkeypatch, tmp_path, capsys):
+        """Only class existence is graph-wide; input checks stay scoped to what runs."""
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_TARGET_OBJECT_INFO)
+        skipped = {"class_type": "SaveImage", "inputs": {"filename_prefix": "a", "images": ["404", 0]}}
+        _lines, exit_code = _cloud_capture(
+            capsys, self._workflow(tmp_path, skipped), wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 0
+        assert len(client.submitted) == 1

@@ -27,6 +27,22 @@ def _registered_build_schemas() -> dict[str, str]:
     return {key: name for key, name in COMMAND_SCHEMAS.items() if key.startswith(_KEY_PREFIX)}
 
 
+def _registered_build_schema_files() -> set[str]:
+    """Every schema file a build command claims, from BOTH catalogs.
+
+    A build command can register twice: once for its envelope payload, and once
+    for the event stream it writes while it runs. The orphan sweep below asks
+    "does anything still emit this file", and one catalog cannot answer that —
+    `build push` names `build_push_event` only in ``STREAM_EVENT_SCHEMAS``, so
+    reading ``COMMAND_SCHEMAS`` alone reports a live schema as abandoned.
+    ``test_discovery.py`` already pairs the two catalogs for the same reason.
+    """
+    from comfy_cli.discovery import STREAM_EVENT_SCHEMAS
+
+    streamed = {name for key, name in STREAM_EVENT_SCHEMAS.items() if key.startswith(_KEY_PREFIX)}
+    return set(_registered_build_schemas().values()) | streamed
+
+
 def test_every_build_command_registers_a_schema_file_that_names_it() -> None:
     # Given
     registered = _registered_build_schemas()
@@ -52,7 +68,7 @@ def test_no_build_schema_file_is_orphaned() -> None:
     shipped = {path.stem for path in SCHEMAS_DIR.glob(f"{_SCHEMA_PREFIX}*.json")}
 
     # When
-    registered = set(_registered_build_schemas().values())
+    registered = _registered_build_schema_files()
 
     # Then
     assert shipped == registered, (

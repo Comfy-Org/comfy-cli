@@ -7,13 +7,16 @@ consumer (the cloud agent) applies; the file write is the single-writer local
 path. Both come from the same ``comfy_cli.workflow_ops`` core, so a local edit
 and a server-side merge stay in lock-step.
 
-Node/link identity is leaderless (random 53-bit ints) so concurrent edits never
-collide; widgets are addressed by name, not array index. See ``workflow_ops``.
+Node/link identity is leaderless (random ints with bit 40 set, below ``2**52``),
+with collisions possible between random draws; widgets are addressed by name,
+not array index. See ``workflow_ops``.
 """
 
 from __future__ import annotations
 
 import json
+import math
+import stat
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -27,6 +30,7 @@ from comfy_cli.command.workflow import (
     _parse_value,
 )
 from comfy_cli.output import get_renderer, rprint
+from comfy_cli.output.sanitize import sanitize_markup
 
 # Shared option aliases — the edit commands (add-node/set-widget/connect/
 # delete-node/capture/apply/foreach) all take the same catalog + CRDT-stamping
@@ -48,9 +52,38 @@ InputOpt = Annotated[str | None, typer.Option("--input", show_default=False)]
 HostOpt = Annotated[str | None, typer.Option(show_default=False)]
 PortOpt = Annotated[int | None, typer.Option(show_default=False)]
 WhereOpt = Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")]
+_MAX_DEFINITION_BYTES = 16 * 1024 * 1024
+
+# Dynamic catalog findings promoted to envelope error codes. The literal-code
+# manifest is also what the registry contract test discovers.
+TYPED_FINDING_ERROR_MANIFEST = (
+    {"code": "unknown_enum_value"},
+    {"code": "no_options_available"},
+    {"code": "below_min"},
+    {"code": "above_max"},
+)
+TYPED_FINDING_ERROR_CODES = frozenset(item["code"] for item in TYPED_FINDING_ERROR_MANIFEST)
 
 
-def _emit_edit_error(renderer, e: ValueError, *, hint: str) -> None:
+def _json_safe_evidence(value: Any) -> Any:
+    """Make finding evidence strict-JSON-safe without losing the operand."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe_evidence(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_evidence(item) for item in value]
+    return value
+
+
+def _emit_edit_error(
+    renderer,
+    e: ValueError,
+    *,
+    hint: str,
+    message_prefix: str = "",
+    extra_details: dict[str, Any] | None = None,
+) -> None:
     """Emit an edit failure, preferring the typed form when one is available.
 
     A :class:`workflow_ops.FatalFindingError` carries the catalog finding, so
@@ -60,11 +93,27 @@ def _emit_edit_error(renderer, e: ValueError, *, hint: str) -> None:
     """
     if isinstance(e, workflow_ops.FatalFindingError):
         f = e.finding
+        code = str(f.get("code") or "workflow_edit_invalid")
+        if code not in TYPED_FINDING_ERROR_CODES:
+            code = "workflow_edit_invalid"
+        if code == "no_options_available":
+            finding_hint = "install the required option or select a catalog that provides one"
+        elif f.get("best_match") is not None:
+            # One option shares the rejected value's leading token (the ratio
+            # in '16:9 (Landscape)'): lead with it rather than a flat list.
+            finding_hint = f"use {f['best_match']!r} — the only option with the same leading token; {hint}"
+        elif f.get("did_you_mean"):
+            finding_hint = f"did you mean: {', '.join(str(v) for v in f['did_you_mean'])}? {hint}"
+        else:
+            finding_hint = hint
+        details = {k: _json_safe_evidence(v) for k, v in f.items() if k != "message"}
+        if extra_details:
+            details.update(_json_safe_evidence(extra_details))
         renderer.error(
-            code=f.get("code", "workflow_edit_invalid"),
-            message=f.get("message", str(e)),
-            hint=(f"did you mean: {', '.join(str(v) for v in f['did_you_mean'])}?" if f.get("did_you_mean") else hint),
-            details={k: v for k, v in f.items() if k != "message"},
+            code=code,
+            message=f"{message_prefix}{f.get('message', str(e))}",
+            hint=finding_hint,
+            details=details,
         )
         return
     renderer.error(code="workflow_edit_invalid", message=str(e), hint=hint)
@@ -86,6 +135,26 @@ def _split_addr(addr: str, renderer) -> tuple[Any, str]:
     return node_id, name.strip()
 
 
+def _warning_text(w: Any) -> str:
+    """Render one warning for a Rich sink — escaped, because the text is untrusted.
+
+    A warning message is composed around values the workflow file chose: a
+    canvas group's ``title``, a node's ``type``. Those are free-form text from
+    a document a user downloaded, and ``repr()`` does not escape ``[``/``]``, so
+    the message reaches Rich with whatever markup the title contained. A group
+    titled ``[/yellow]`` raises ``MarkupError`` — the warning that exists to
+    report a dropped group would instead crash the command, after ``--out`` has
+    already been written. ``[link=...]`` plants a live OSC-8 hyperlink, and a
+    workaday title like ``[w/ controlnet]`` is silently swallowed as an unknown
+    tag.
+
+    Escaping here rather than at the ``capture_recipe`` call site keeps the
+    warning dicts in ``data.warnings`` byte-identical for JSON consumers — per
+    ``output.sanitize``, the escape belongs on the pretty path only.
+    """
+    return sanitize_markup(w.get("message", w) if isinstance(w, dict) else w)
+
+
 def _finish(renderer, p, workflow: dict, op: dict, base_version: int, stdout: bool, command: str) -> None:
     """Serialize the mutated workflow (file or stdout) and emit the op envelope.
 
@@ -105,7 +174,7 @@ def _finish(renderer, p, workflow: dict, op: dict, base_version: int, stdout: bo
         sys.stdout.write("\n")
         sys.stdout.flush()
         for w in op.get("warnings") or []:
-            renderer.stderr_console().print(f"[yellow]warning:[/yellow] {w}")
+            renderer.stderr_console().print(f"[yellow]warning:[/yellow] {_warning_text(w)}")
         return
     wrote: str | None = None
     if not stdout:
@@ -128,13 +197,99 @@ def _finish(renderer, p, workflow: dict, op: dict, base_version: int, stdout: bo
     renderer.emit(payload, command=command, changed=not stdout)
 
 
+def _emit_op(renderer, p: Path, op: dict, base_version: int, command: str) -> None:
+    """Emit an op without applying it or writing the source workflow."""
+    payload = {"workflow": str(p), "op": op, "base_version": base_version, "wrote": None}
+    if renderer.is_pretty():
+        rprint(f"[bold green]✓[/bold green] {op['op']} emitted for [dim]{p}[/dim]")
+    renderer.emit(payload, command=command, changed=False)
+
+
 def _graph_or_exit(input_path, host, port, renderer, where=None):
     return _get_graph(input_path, host, port, where=where)
 
 
 # ---------------------------------------------------------------------------
+# define-subgraph
+# ---------------------------------------------------------------------------
+
+
+def _read_subgraph_definition(path: Path):
+    """Read a bounded regular JSON file without blocking on devices or FIFOs."""
+    file_stat = path.stat()
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise ValueError("subgraph definition must be a regular file")
+    if file_stat.st_size > _MAX_DEFINITION_BYTES:
+        raise ValueError(f"subgraph definition is too large (maximum {_MAX_DEFINITION_BYTES} bytes)")
+    try:
+        with path.open("rb") as definition_file:
+            raw = definition_file.read(_MAX_DEFINITION_BYTES + 1)
+        if len(raw) > _MAX_DEFINITION_BYTES:
+            raise ValueError(f"subgraph definition is too large (maximum {_MAX_DEFINITION_BYTES} bytes)")
+        return json.loads(raw.decode("utf-8"))
+    except (RecursionError, MemoryError) as error:
+        raise ValueError("subgraph definition is too deeply nested or too large") from error
+
+
+@tracking.track_command("workflow")
+def define_subgraph_cmd(
+    file: Annotated[str, typer.Argument(help="Source frontend-format workflow JSON; emit-only, file is not modified.")],
+    definition_file: Annotated[str, typer.Argument(help="Serializable subgraph definition JSON.")],
+    subgraph_id: Annotated[str | None, typer.Option("--id", show_default=False)] = None,
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+):
+    """Create one subgraph definition and emit one ``define_subgraph`` op."""
+    renderer = get_renderer()
+    renderer.command = "workflow define-subgraph"
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    try:
+        definition_path = Path(definition_file).expanduser()
+        definition = _read_subgraph_definition(definition_path)
+        _, op = workflow_ops.define_subgraph(
+            workflow,
+            definition,
+            subgraph_id=subgraph_id,
+            actor=actor,
+            base_version=base_version,
+        )
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as e:
+        _emit_edit_error(renderer, e, hint="provide a serializable subgraph definition JSON object")
+        raise typer.Exit(code=1) from e
+    _emit_op(renderer, p, op, base_version, "workflow define-subgraph")
+
+
+# ---------------------------------------------------------------------------
 # add-node
 # ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def insert_workflow_cmd(
+    file: Annotated[str, typer.Argument(help="Source frontend-format workflow JSON; emit-only, file is not modified.")],
+    template: Annotated[str, typer.Argument(help="Frontend-format workflow JSON to insert, or '-' for stdin.")],
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+):
+    """Insert a workflow template and emit one atomic ``insert_workflow`` op."""
+    renderer = get_renderer()
+    renderer.command = "workflow insert-workflow"
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    try:
+        if template == "-":
+            import sys
+
+            raw = sys.stdin.read()
+        else:
+            raw = Path(template).expanduser().read_text(encoding="utf-8")
+        inserted = json.loads(raw)
+        if not isinstance(inserted, dict):
+            raise ValueError("template must be a JSON object")
+        _, op = workflow_ops.insert_workflow(workflow, inserted, actor=actor, base_version=base_version)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+        _emit_edit_error(renderer, e, hint="provide a frontend-format workflow template JSON file")
+        raise typer.Exit(code=1) from e
+    _emit_op(renderer, p, op, base_version, "workflow insert-workflow")
 
 
 @tracking.track_command("workflow")
@@ -145,12 +300,24 @@ def add_node_cmd(
         str | None,
         typer.Option("--at", show_default=False, help="Canvas position 'x,y' for the new node."),
     ] = None,
+    title: Annotated[
+        str | None,
+        typer.Option("--title", show_default=False, help="Custom display title for the new node."),
+    ] = None,
     allow_deprecated: Annotated[
         bool,
         typer.Option(
             "--allow-deprecated", show_default=False, help="Add the node even though the catalog marks it deprecated."
         ),
     ] = False,
+    text: Annotated[
+        str | None,
+        typer.Option(
+            "--text",
+            show_default=False,
+            help="Body text for a Note / MarkdownNote (annotation nodes; no catalog entry). Invalid for other classes.",
+        ),
+    ] = None,
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
@@ -180,9 +347,11 @@ def add_node_cmd(
             graph,
             class_type,
             pos=pos,
+            title=title,
             actor=actor,
             base_version=base_version,
             allow_deprecated=allow_deprecated,
+            text=text,
         )
     except workflow_ops.DeprecatedNodeType as e:
         renderer.error(
@@ -197,9 +366,15 @@ def add_node_cmd(
         # the error alone. (The old hint pointed at `comfy nodes types`, which
         # lists connection types — MODEL/LATENT/IMAGE — not class_types.)
         if e.ui_only:
-            hint = "use a real node class; to annotate the graph, set a title/widget on an existing node instead"
+            hint = (
+                "use a real node class; to annotate the graph, add a `Note` or `MarkdownNote` with --text "
+                "(the only UI-only classes this surface can mint)"
+            )
         elif e.subgraph_id:
-            hint = "pick a node CLASS from `comfy nodes search <text>`; a subgraph instance cannot be added"
+            hint = (
+                "reuse the exact definition id from `comfy workflow ls-nodes <file>` only in the workflow that "
+                "already contains that definition and an instance, or pick a node class with `comfy nodes search <text>`"
+            )
         elif e.close_matches:
             hint = f"did you mean: {', '.join(e.close_matches)}?"
         else:
@@ -259,6 +434,9 @@ def set_widget_cmd(
         workflow, op = workflow_ops.set_widget(
             workflow, graph, node_id, widget, _parse_value(value), actor=actor, base_version=base_version
         )
+    except workflow_ops.NoteTextNotWritable as e:
+        _emit_edit_error(renderer, e, hint=e.hint)
+        raise typer.Exit(code=1) from e
     except ValueError as e:
         _emit_edit_error(
             renderer,
@@ -268,6 +446,69 @@ def set_widget_cmd(
         )
         raise typer.Exit(code=1) from e
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow set-widget")
+
+
+# ---------------------------------------------------------------------------
+# set-node-field (PROPOSED, op-vocabulary-v1 amendment v1.6 — not yet ratified)
+# ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def set_node_field_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    node: Annotated[str, typer.Argument(help="Node id.")],
+    field: Annotated[
+        str,
+        typer.Argument(help="Field: `title`, `mode`, `flags.collapsed` or `flags.pinned`."),
+    ],
+    value: Annotated[
+        str | None,
+        typer.Argument(
+            show_default=False,
+            help="New value (parsed as JSON, else literal string). Omit and pass --clear to clear the field.",
+        ),
+    ] = None,
+    clear: Annotated[
+        bool,
+        typer.Option("--clear", show_default=False, help="Clear the field back to absent."),
+    ] = False,
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+):
+    """Set, or clear, one durable node field; emits a ``set_node_field`` op.
+
+    PROPOSED: ``set_node_field`` is not yet part of the ratified
+    docs/op-vocabulary-v1.md contract — see that document's §1.8. It
+    supersedes the withdrawn, title-only ``set_title`` proposal and mirrors
+    comfy-multi-player#235's merged ``set_node_field`` CRDT op.
+    """
+    renderer = get_renderer()
+    renderer.command = "workflow set-node-field"
+    if clear == (value is not None):
+        renderer.error(
+            code="workflow_edit_invalid",
+            message="pass exactly one of VALUE or --clear",
+            hint='`comfy workflow set-node-field <file> <node_id> <field> "value"` or '
+            "`comfy workflow set-node-field <file> <node_id> <field> --clear`",
+        )
+        raise typer.Exit(code=1)
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    # No catalog is needed to write these fields (unlike set-widget): none of
+    # `title`/`mode`/`flags.collapsed`/`flags.pinned` is a catalogued widget.
+    node_id: Any = int(node) if node.lstrip("-").isdigit() else node
+    try:
+        workflow, op = workflow_ops.set_node_field(
+            workflow, node_id, field, None if clear else _parse_value(value), actor=actor, base_version=base_version
+        )
+    except ValueError as e:
+        _emit_edit_error(
+            renderer,
+            e,
+            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read",
+        )
+        raise typer.Exit(code=1) from e
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow set-node-field")
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +551,42 @@ def connect_cmd(
 
 
 # ---------------------------------------------------------------------------
+# disconnect
+# ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def disconnect_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    target: Annotated[str, typer.Argument(help="Target `<node_id>.<input_slot>` (slot name or index).")],
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+    input_path: InputOpt = None,
+    host: HostOpt = None,
+    port: PortOpt = None,
+    where: WhereOpt = None,
+):
+    renderer = get_renderer()
+    renderer.command = "workflow disconnect"
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    graph = _graph_or_exit(input_path, host, port, renderer, where)
+    to_node, to_slot = _split_addr(target, renderer)
+    try:
+        workflow, op = workflow_ops.disconnect(
+            workflow, graph, to_node, to_slot, actor=actor, base_version=base_version
+        )
+    except ValueError as e:
+        _emit_edit_error(
+            renderer,
+            e,
+            hint="run `comfy workflow print <file>` to inspect current links and input addresses",
+        )
+        raise typer.Exit(code=1) from e
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow disconnect")
+
+
+# ---------------------------------------------------------------------------
 # delete
 # ---------------------------------------------------------------------------
 
@@ -317,7 +594,7 @@ def connect_cmd(
 @tracking.track_command("workflow")
 def delete_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
-    node: Annotated[str, typer.Argument(help="Node id to delete.")],
+    node: Annotated[str, typer.Argument(help="Node id or interior path to delete (for example 70/22).")],
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
@@ -341,7 +618,9 @@ def delete_cmd(
             "read (`comfy workflow slots <file>` for exact widget addresses)",
         )
         raise typer.Exit(code=1) from e
-    _finish(renderer, p, workflow, op, base_version, stdout, "workflow delete")
+    # `workflow delete-node`, matching renderer.command above and the error path.
+    # `workflow delete` is the unrelated cloud/local CRUD verb (workflow.py).
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow delete-node")
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +631,7 @@ def delete_cmd(
 @tracking.track_command("workflow")
 def delete_nodes_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
-    nodes: Annotated[list[str], typer.Argument(help="Node ids to delete (one or more).")],
+    nodes: Annotated[list[str], typer.Argument(help="Node ids or interior paths to delete (one or more).")],
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
@@ -435,9 +714,9 @@ def _load_clearable_workflow_or_fail(renderer, path: str) -> tuple[Path, dict[st
     API-format document (``workflow_not_frontend_format``), because slot
     addressing needs ``nodes[]``/``links[]``. ``clear`` and ``reset-doc`` do
     not: the result is the empty frontend document either way. Gating them on
-    the format of what is being thrown away locked a tab in prod — a
+    the format of what is being thrown away could lock a tab — a
     ``generate --emit-workflow`` API-format draft could then be neither edited
-    NOR cleared, and the agent abandoned the tab.
+    NOR cleared, leaving the caller nothing to do but abandon the tab.
 
     An API-format file is replaced by the empty frontend baseline (the same
     shape ``foreach`` mints a fresh document from) so the op applies to a
@@ -545,9 +824,169 @@ def reset_doc_cmd(
 # _MODE_MUTED / _MODE_BYPASS.
 _MODE_LABELS = {2: "mute", 4: "bypass"}
 
+# Ceiling on the interior rows one `ls-nodes` will emit. The depth cap plus the
+# per-path `seen_defs` set bound *cycles* and *linear* nesting, but neither
+# bounds a BRANCHING acyclic definition graph: 32 distinct definitions that each
+# hold two instances of the next never repeat a definition on any path and never
+# exceed the depth cap, yet expand a few-KB file into ~2**32 rows (measured: 12
+# such levels already yield 8189). Every row is accumulated in memory, then
+# serialized to JSON and rendered, so the depth cap alone is not a work bound.
+# Real graphs are nowhere near this — the largest subgraph-heavy workflows run
+# to low hundreds of interior nodes — but this is an output ceiling, not a
+# verdict on the file: a legitimately huge graph reaches it the same way a
+# corrupt or hostile one does, and `subgraph_truncated` tells the consumer only
+# that the listing is short.
+_MAX_SUBGRAPH_INTERIOR_ROWS = 10_000
+
+
+def _mode_label(node: dict) -> str | None:
+    """The ``mute``/``bypass`` label for a node, or None when it executes.
+
+    ``_MODE_LABELS.get`` HASHES its argument, so a node serialized with
+    ``"mode": []`` or ``{}`` would raise ``TypeError: unhashable type`` and abort
+    the command with a traceback instead of an error envelope. Litegraph modes
+    are ints (2 = mute, 4 = bypass), but a JSON file may write them as the
+    integral floats ``2.0`` / ``4.0`` — those must still hash to the int keys
+    (``4 == 4.0``) the way the previous inline check did. ``bool`` is an int
+    subclass but matches neither 2 nor 4, so it falls through to None like any
+    other non-mode value.
+    """
+    mode = node.get("mode")
+    if isinstance(mode, bool) or not isinstance(mode, (int, float)):
+        return None
+    return _MODE_LABELS.get(mode)
+
+
+def _node_title(node: dict) -> Any:
+    """A node's display title, falling back to its S&R name.
+
+    ``properties`` is a dict in every ComfyUI save, but ls-nodes reads an
+    ARBITRARY file: a truthy non-dict (``"properties": ["a"]``) survives an
+    ``or {}`` guard and then raises ``AttributeError`` on ``.get``. Returned
+    verbatim rather than coerced — see the schema note on `title`.
+    """
+    props = node.get("properties")
+    return node.get("title") or (props.get("Node name for S&R") if isinstance(props, dict) else None)
+
 
 # ls-nodes — recover node ids/types (so an agent can address minted nodes)
 # ---------------------------------------------------------------------------
+
+
+def _subgraph_interior_rows(workflow: dict) -> tuple[list[dict], bool]:
+    """Rows for the nodes INSIDE every live subgraph instance, flattened.
+
+    ``workflow["nodes"]`` only carries the top level: a subgraph instance is a
+    single opaque node whose ``type`` is its definition's UUID, and the nodes it
+    actually executes live under ``definitions.subgraphs[].nodes``. Those
+    interiors are the ones ``workflow_to_api`` expands and then drops when they
+    are muted/bypassed — so without this a reader sees a graph that silently
+    runs without a node, with nothing in ``ls-nodes`` to explain it.
+
+    Addresses match ``comfy workflow slots`` exactly (``<instance>/<interior>``,
+    nesting with ``/``), so a path from here is directly usable as a slot
+    address prefix. Emitted under the sibling ``subgraph_nodes`` key, never
+    appended to ``nodes`` — consumers render ``nodes[]`` verbatim and pin it.
+
+    Returns ``(rows, truncated)``; ``truncated`` is True when the walk stopped at
+    ``_MAX_SUBGRAPH_INTERIOR_ROWS`` and the listing is therefore incomplete.
+
+    Every container is shape-checked before use. ls-nodes reads an ARBITRARY
+    file — it is the one workflow command with no catalog and no validation gate
+    in front of it — so a corrupt document must yield an error envelope or a
+    short listing, never a traceback.
+    """
+    from comfy_cli.cql.engine import _MAX_SUBGRAPH_DEPTH, _SUBGRAPH_PATH_SEP, _subgraph_defs_by_id
+
+    # `_subgraph_defs_by_id` assumes `definitions` is a dict whose `subgraphs` is
+    # a list (true of every ComfyUI save). Hand it `"definitions": 5` and it
+    # raises AttributeError; `"subgraphs": 5`, TypeError. Screen both here rather
+    # than in cql.engine, so this stays a change to ls-nodes' own contract.
+    defs = workflow.get("definitions")
+    if not isinstance(defs, dict) or not isinstance(defs.get("subgraphs"), list):
+        return [], False
+    defs_by_id = _subgraph_defs_by_id(workflow)
+    if not defs_by_id:
+        return [], False
+    interior: list[dict] = []
+    truncated = False
+
+    def _def_for(node: dict) -> dict | None:
+        """The subgraph definition a node instantiates, or None for a plain node.
+
+        Every key in ``defs_by_id`` is a non-empty ``str``, so a node whose
+        ``type`` is missing or non-string can never be an instance — and looking
+        one up unguarded would either coerce ``None`` into the matchable string
+        ``"None"`` or raise ``TypeError`` on an unhashable (list/dict) ``type``.
+        """
+        node_type = node.get("type")
+        return defs_by_id.get(node_type) if isinstance(node_type, str) else None
+
+    def walk(nodes: Any, prefix: str, instance: str, depth: int, seen_defs: frozenset[int]) -> None:
+        nonlocal truncated
+        # Same depth cap the slot walker uses (cql.engine), for the same reason:
+        # a hand-written or corrupt document can nest subgraphs pathologically.
+        if depth > _MAX_SUBGRAPH_DEPTH:
+            return
+        # A definition's `nodes` is a list in every save; `"nodes": 1` survives
+        # `or []` (it is truthy) and then raises TypeError on iteration.
+        if not isinstance(nodes, list):
+            return
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            # Checked AFTER the shape filter: `subgraph_truncated` promises a
+            # REPORTABLE row was omitted, and a malformed entry would never have
+            # produced one. Testing first would flag a listing as short because
+            # the tail of the document was junk we drop either way.
+            if len(interior) >= _MAX_SUBGRAPH_INTERIOR_ROWS:
+                truncated = True
+                return
+            node_id = n.get("id")
+            # Stringified exactly as the slot walker stringifies it, so the two
+            # commands' addresses stay byte-identical; ``id`` stays verbatim.
+            # Joined the way the slot walker joins, too: prepending the separator
+            # unconditionally would turn an instance with no `id` (prefix "")
+            # into `/9`, whose leading empty segment resolves as no slot address.
+            node_path = str(n.get("id", ""))
+            path = f"{prefix}{_SUBGRAPH_PATH_SEP}{node_path}" if prefix else node_path
+            row = {
+                "path": path,
+                "instance": instance,
+                "id": node_id,
+                "type": n.get("type"),
+                "title": _node_title(n),
+            }
+            # Label-only-when-set, exactly as the top-level rows do.
+            if (label := _mode_label(n)) is not None:
+                row["mode"] = label
+            interior.append(row)
+            sg = _def_for(n)
+            # The depth cap alone bounds a *linear* cycle at 32 rows, but a
+            # definition that reaches itself while ALSO branching would cost
+            # branches**32 rows before that cap fires. A definition already open
+            # on this path can only be a cycle (ComfyUI cannot author one), so
+            # stop there; a def reused on sibling paths is unaffected.
+            if sg is not None and id(sg) not in seen_defs:
+                walk(sg.get("nodes"), path, instance, depth + 1, seen_defs | {id(sg)})
+
+    top = workflow.get("nodes")
+    for n in top if isinstance(top, list) else []:
+        if truncated:
+            break
+        if not isinstance(n, dict):
+            continue
+        sg = _def_for(n)
+        if sg is None:
+            continue
+        instance = str(n.get("id", ""))
+        # Recurse whether or not the instance itself is muted: the consumer keys
+        # on the root row's own mode, which `nodes[]` already carries. An
+        # interior instance's own row carries ITS mode too, so a caller deciding
+        # what actually executes joins the modes along a row's `path` prefixes —
+        # see the `subgraph_nodes` schema description.
+        walk(sg.get("nodes"), instance, instance, 1, frozenset({id(sg)}))
+    return interior, truncated
 
 
 @tracking.track_command("workflow")
@@ -557,14 +996,22 @@ def ls_nodes_cmd(
     renderer = get_renderer()
     renderer.command = "workflow ls-nodes"
     p, workflow = _load_workflow_or_fail(renderer, file)
+    from comfy_cli.cql.engine import _subgraph_defs_by_id
+
+    nodes = [node for node in workflow.get("nodes") or [] if isinstance(node, dict)]
+    node_types = {node.get("type") for node in nodes if isinstance(node.get("type"), str)}
+    # Use the editor's exact id/legacy-name resolver. Reimplementing only part
+    # of its conflict analysis made listing disagree with path navigation.
+    definitions = workflow.get("definitions")
+    raw_subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    resolved_subgraphs = _subgraph_defs_by_id(workflow) if isinstance(raw_subgraphs, list) else {}
+    subgraph_ids = {node_type for node_type in node_types if node_type in resolved_subgraphs}
     rows = []
-    for n in workflow.get("nodes") or []:
-        if not isinstance(n, dict):
-            continue
+    for n in nodes:
         row = {
             "id": n.get("id"),
             "type": n.get("type"),
-            "title": n.get("title") or (n.get("properties") or {}).get("Node name for S&R"),
+            "title": _node_title(n),
         }
         # ComfyUI disables a node without deleting it: mode 4 = bypass (input
         # passes through), mode 2 = mute/never (dropped from execution). Both are
@@ -572,20 +1019,80 @@ def ls_nodes_cmd(
         # from a live one — and would "repair" a graph that is merely bypassed,
         # or call a workflow runnable while a required node is muted.
         # Emitted only when set, so a normal node stays a single clean row.
-        if (label := _MODE_LABELS.get(n.get("mode"))) is not None:
+        if (label := _mode_label(n)) is not None:
             row["mode"] = label
+        # A row's `type` reads like an addable class. Two kinds are not: a
+        # frontend-only node (Reroute/Note/PrimitiveNode/...) and a subgraph
+        # instance, whose `type` is its definition uuid. Both stay listed (the
+        # graph must still be understood); the flag distinguishes them from
+        # catalog classes. Only set when true, like `mode`.
+        node_type = n.get("type")
+        if isinstance(node_type, str):
+            if workflow_ops._UUID_RE.match(node_type) or node_type in subgraph_ids:
+                row["subgraph"] = True
+            elif node_type in workflow_ops.UI_ONLY_NODE_TYPES:
+                row["ui_only"] = True
         rows.append(row)
-    payload = {"workflow": str(p), "count": len(rows), "nodes": rows}
+    interior, truncated = _subgraph_interior_rows(workflow)
+    # `count`/`nodes` keep their exact pre-existing meaning (top level only) —
+    # interiors go under a NEW sibling key, because consumers render every
+    # `nodes[]` entry verbatim and pin that listing.
+    payload = {
+        "workflow": str(p),
+        "count": len(rows),
+        "nodes": rows,
+        "subgraph_nodes": interior,
+        "subgraph_count": len(interior),
+    }
+    if truncated:
+        # Only when set, like `mode`: a normal listing carries no such key, and
+        # a consumer that must not act on a partial graph checks for it.
+        payload["subgraph_truncated"] = True
     if renderer.is_pretty():
         from rich.table import Table
 
+        # Every cell below is copied verbatim out of the workflow file, and
+        # `Table.add_row` interprets a `str` as Rich MARKUP: an unbalanced `[/]`
+        # in a title raises MarkupError mid-render, `[link=...]` renders a live
+        # OSC 8 hyperlink, and raw control bytes reach the terminal.
+        # `sanitize_markup` escapes the markup and strips the escapes, and
+        # coerces non-strings, so it replaces the bare `str()` calls too.
         tbl = Table(show_header=True, header_style="bold")
         tbl.add_column("id", no_wrap=True)
         tbl.add_column("type")
         tbl.add_column("title", style="dim")
+        tbl.add_column("state", style="yellow")
         for r in rows:
-            tbl.add_row(str(r["id"]), str(r["type"]), str(r["title"] or ""))
+            state = ", ".join(
+                value
+                for value in (
+                    r.get("mode"),
+                    "ui-only" if r.get("ui_only") else None,
+                    "subgraph" if r.get("subgraph") else None,
+                )
+                if value
+            )
+            tbl.add_row(sanitize_markup(r["id"]), sanitize_markup(r["type"]), sanitize_markup(r["title"] or ""), state)
         renderer.console().print(tbl)
+        if interior:
+            sub = Table(show_header=True, header_style="bold", title="subgraph interiors")
+            sub.add_column("path", no_wrap=True)
+            sub.add_column("type")
+            sub.add_column("title", style="dim")
+            sub.add_column("mode", style="dim")
+            for r in interior:
+                sub.add_row(
+                    sanitize_markup(r["path"]),
+                    sanitize_markup(r["type"]),
+                    sanitize_markup(r["title"] or ""),
+                    r.get("mode", ""),  # ours, from _MODE_LABELS — never file text
+                )
+            renderer.console().print(sub)
+            if truncated:
+                rprint(
+                    f"[yellow]![/yellow] subgraph interiors truncated at "
+                    f"{_MAX_SUBGRAPH_INTERIOR_ROWS} rows; the listing is incomplete"
+                )
     renderer.emit(payload, command="workflow ls-nodes")
 
 
@@ -665,12 +1172,12 @@ def capture_cmd(
         if wrote:
             rprint(f"[bold green]✓[/bold green] captured {len(recipe['ops'])} ops → [dim]{wrote}[/dim]")
             for w in warnings:
-                rprint(f"  [yellow]warning:[/yellow] {w.get('message', w)}")
+                rprint(f"  [yellow]warning:[/yellow] {_warning_text(w)}")
         else:
             # stdout holds exactly the recipe JSON; warnings would corrupt a
             # redirect, so they go to stderr rather than being dropped.
             for w in warnings:
-                renderer.stderr_console().print(f"[yellow]warning:[/yellow] {w.get('message', w)}")
+                renderer.stderr_console().print(f"[yellow]warning:[/yellow] {_warning_text(w)}")
     renderer.emit(payload, command="workflow capture")
 
 
@@ -754,13 +1261,31 @@ def apply_cmd(
         raise typer.Exit(code=1) from e
 
     try:
+        # Batchable-but-deferred kinds (define_subgraph) cannot be persisted by
+        # a local apply. Standalone-only deferred kinds (insert_workflow) fall
+        # through to apply_specs so they surface their own not-batchable code.
+        deferred = [
+            spec.get("op")
+            for spec in specs
+            if isinstance(spec, dict)
+            and spec.get("op") in workflow_ops.DEFERRED_OPS
+            and spec.get("op") in workflow_ops.BATCHABLE_OPS
+        ]
+        if deferred:
+            raise ValueError(f"local apply cannot persist deferred operation(s): {', '.join(deferred)}")
         workflow, ops, aliases = workflow_ops.apply_specs(
             workflow, graph, specs, actor=actor, base_version=base_version
         )
     except workflow_ops.NotBatchableError as e:
         # A standalone-only op (clear) inside the batch: its own registered code,
         # with the hint naming the standalone command to run instead.
-        renderer.error(code=e.code, message=f"batch failed: {e}", hint=e.hint)
+        details = None
+        if ack == "summary":
+            details = {
+                "failed": {"index": e.spec_index, "op": e.spec_op, "code": e.code},
+                "applied_count": e.applied_count,
+            }
+        renderer.error(code=e.code, message=f"batch failed: {e}", hint=e.hint, details=details)
         raise typer.Exit(code=1) from e
     except workflow_ops.DeprecatedNodeType as e:
         renderer.error(
@@ -768,6 +1293,28 @@ def apply_cmd(
             message=f"batch failed: {e}",
             hint=e.hint,
             details={"requested": e.class_type, "replacement": e.replacement},
+        )
+        raise typer.Exit(code=1) from e
+    except workflow_ops.FatalFindingError as e:
+        # ``apply_specs`` preserves typed catalog refusals while re-hinting
+        # them against the pre-batch graph. Emit the same operand evidence as
+        # a standalone edit, plus the atomic-batch failure position.
+        details = None
+        if ack == "summary":
+            details = {
+                "failed": {
+                    "index": e.spec_index,
+                    "op": e.spec_op,
+                    "code": e.finding.get("code", "workflow_edit_invalid"),
+                },
+                "applied_count": e.applied_count,
+            }
+        _emit_edit_error(
+            renderer,
+            e,
+            hint="correct the rejected value and retry the whole batch",
+            message_prefix="batch failed: ",
+            extra_details=details,
         )
         raise typer.Exit(code=1) from e
     except (ValueError, KeyError) as e:
@@ -872,6 +1419,29 @@ def _load_param_sets(raw: str, renderer) -> list[dict]:
     return sets
 
 
+def _reject_deferred_specs(specs: list) -> None:
+    """Refuse to persist a batch locally when any spec is a deferred op kind.
+
+    Only the kinds that are deferred AND batchable (``define_subgraph``) are
+    stopped here: ``apply_specs`` would dispatch them, so without this check a
+    local ``foreach`` would persist an op whose replay belongs to cmp. A
+    standalone-only deferred kind (``insert_workflow``) is left to fall through
+    so ``apply_specs`` raises :class:`workflow_ops.NotBatchableError` and the
+    caller gets the registered ``workflow_insert_workflow_not_batchable`` code
+    and the standalone command, not a generic ``workflow_edit_invalid``. This
+    mirrors ``apply_cmd``, which already intersects the two sets.
+    """
+    deferred = [
+        spec.get("op")
+        for spec in specs
+        if isinstance(spec, dict)
+        and spec.get("op") in workflow_ops.DEFERRED_OPS
+        and spec.get("op") in workflow_ops.BATCHABLE_OPS
+    ]
+    if deferred:
+        raise ValueError(f"local foreach cannot persist deferred operation(s): {', '.join(deferred)}")
+
+
 @tracking.track_command("workflow")
 def foreach_cmd(
     recipe_file: Annotated[str, typer.Argument(help="Recipe file: {params, ops}.")],
@@ -917,11 +1487,15 @@ def foreach_cmd(
     out.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
     try:
+        _reject_deferred_specs(specs_template)
         for i, pset in enumerate(param_sets):
             if not isinstance(pset, dict):
                 raise workflow_ops.RecipeError(f"param-set #{i} must be a JSON object")
             params = workflow_ops.resolve_params(params_decl, {k: str(v) for k, v in pset.items()})
             specs = workflow_ops.substitute_params(specs_template, params)
+            # The op kind itself may be a `${param}`, so the template check above
+            # cannot see a kind that only becomes deferred for this param-set.
+            _reject_deferred_specs(specs)
             wf: dict = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
             wf, _ops, _aliases = workflow_ops.apply_specs(wf, graph, specs, actor=actor, base_version=base_version)
             workflow_ops.strip_internal(wf)

@@ -54,7 +54,7 @@ from comfy_cli.config_manager import ConfigManager
 from comfy_cli.output.renderer import Renderer, get_renderer
 from comfy_cli.output.sanitize import sanitize_markup
 
-_HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
+_HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Reve, …)."
 
 _CONTEXT_SETTINGS = {
     "allow_extra_args": True,
@@ -593,6 +593,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
             prefix = meta.get("output-prefix") if isinstance(meta.get("output-prefix"), str) else "generate"
             renderer = get_renderer()
             ops: list | None = None
+            ops_skipped: str | None = None
             from comfy_cli import workflow_ops
 
             try:
@@ -625,7 +626,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
                         # is left without its terminal event.
                         _track_error("emit", e)
                         raise
-                    workflow, ops = emit.write_frontend_workflow(
+                    workflow, ops, ops_skipped = emit.write_frontend_workflow(
                         name,
                         values,
                         Path(emit_path).expanduser(),
@@ -645,10 +646,11 @@ def _generate(model: str, extra_args: list[str]) -> None:
                     code="emit_workflow_unsupported_model",
                     message=str(e),
                     hint=(
-                        "choose a model whose `emit_supported` is true in `comfy --json generate list` "
-                        "(see `details.supported`), or call the model through the proxy without --emit-workflow"
+                        "retry with the first alias in `details.suggested` (same kind of media), or any whose "
+                        "`emit_supported` is true in `comfy --json generate list` (`details.supported`); "
+                        "or call the model through the proxy without --emit-workflow"
                     ),
-                    details={"model": e.model, "supported": e.supported},
+                    details={"model": e.model, "supported": e.supported, "suggested": e.suggested},
                 )
                 raise typer.Exit(code=1) from e
             except workflow_ops.DeprecatedNodeType as e:
@@ -682,6 +684,17 @@ def _generate(model: str, extra_args: list[str]) -> None:
             if renderer.is_pretty():
                 rprint(f"[bold green]Wrote workflow:[/bold green] {emit_path}")
                 rprint(f"  run it: comfy run --workflow {emit_path}")
+                if ops_skipped:
+                    # `--emit-ops` is a request, and this is the one path where
+                    # it silently went unanswered: the batch is reported as
+                    # `ops_skipped` in the envelope below, which `emit()` does
+                    # not print in pretty mode. Without this the user asked for
+                    # ops, saw only "Wrote workflow", and had no way to tell the
+                    # batch apart from one that was minted.
+                    renderer.warn(
+                        f"--emit-ops: no batch was minted — {ops_skipped}",
+                        hint="the workflow file above is complete; apply it as a whole document",
+                    )
             payload = {
                 "out": str(Path(emit_path).expanduser()),
                 "model": name,
@@ -690,6 +703,12 @@ def _generate(model: str, extra_args: list[str]) -> None:
             }
             if ops is not None:
                 payload["ops"] = ops
+            elif ops_skipped:
+                # Same envelope key `templates fetch --emit-ops` uses: the file
+                # was written, the batch was not minted, and this says why so a
+                # consumer can fall back to the whole-document path instead of
+                # guessing from a missing key.
+                payload["ops_skipped"] = ops_skipped
             renderer.emit(payload, command="generate emit-workflow")
             return
 
@@ -780,15 +799,18 @@ def _generate(model: str, extra_args: list[str]) -> None:
             )
 
         if ep.polling:
-            job_id = poll.extract_job_id(ep.polling, body) or request_id
+            job_model = adapters.request_model(ep.id, values)
+            polling = poll.poller_name(ep.polling, job_model)
+            job_id = poll.extract_job_id(polling, body) or request_id
             name = gen_props["model_alias"] or ep.id
             if do_async:
                 if as_json:
                     output.print_json(body)
                 else:
+                    resume_model = f" --model {job_model}" if job_model else ""
                     rprint(f"[bold green]Submitted:[/bold green] {name}")
                     rprint(f"  job id: {job_id}")
-                    rprint(f"  resume: comfy generate resume {name} {job_id}")
+                    rprint(f"  resume: comfy generate resume {name} {job_id}{resume_model}")
                 # Submitted, not succeeded — the workflow runs on the partner side and completion is
                 # observed server-side via partner_node:api_call_*. No generate:success pair here.
                 tracking.track_event(
@@ -802,7 +824,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
                 )
                 return
 
-            poller = poll.get_poller(ep.polling)
+            poller = poll.get_poller(polling)
             poll_error: client.ApiError | httpx.HTTPError | None = None
             with _spinner() as prog:
                 task = prog.add_task(f"Generating with {name} (job {job_id})", total=None)
@@ -1197,7 +1219,7 @@ def _resume(extra_args: list[str]) -> None:
     model, job_id = extra_args[0], extra_args[1]
     tail = extra_args[2:]
     try:
-        ep = spec.get_endpoint(model)
+        ep = spec.get_resume_endpoint(model)
     except spec.SpecError as e:
         _fail(code="generate_unknown_model", message=str(e), details={"model": model})
         raise typer.Exit(code=1)
@@ -1207,10 +1229,17 @@ def _resume(extra_args: list[str]) -> None:
         )
         raise typer.Exit(code=1)
     try:
-        _, meta = _separate_meta_flags(tail)
+        rest, meta = _separate_meta_flags(tail)
     except schema.SchemaError as e:
         _fail(code="generate_bad_args", message=str(e))
         raise typer.Exit(code=1)
+    job_values: dict[str, Any] = {}
+    for i, tok in enumerate(rest):
+        if tok.startswith("--model="):
+            job_values["model"] = tok.split("=", 1)[1]
+        elif tok == "--model" and i + 1 < len(rest):
+            job_values["model"] = rest[i + 1]
+    polling = poll.poller_name(ep.polling, adapters.request_model(ep.id, job_values))
     try:
         api_key = client.resolve_api_key(meta.get("api-key") if isinstance(meta.get("api-key"), str) else None)
     except client.ApiError as e:
@@ -1230,12 +1259,12 @@ def _resume(extra_args: list[str]) -> None:
     as_json = bool(meta.get("json", False))
 
     try:
-        initial = poll.build_synthetic_initial(ep.polling, job_id, base_url=spec.base_url())
+        initial = poll.build_synthetic_initial(polling, job_id, base_url=spec.base_url())
     except client.ApiError as e:
         _fail(code="generate_api_error", message=str(e))
         raise typer.Exit(code=1)
 
-    poller = poll.get_poller(ep.polling)
+    poller = poll.get_poller(polling)
     poll_error: client.ApiError | httpx.HTTPError | None = None
     with _spinner() as prog:
         task = prog.add_task(f"Resuming job {job_id}", total=None)
@@ -1297,5 +1326,5 @@ def _print_top_help() -> None:
         "`comfy generate consent always`) to skip, required for --json / non-TTY runs.[/dim]"
     )
     rprint(
-        "[dim]Auth: run `comfy cloud login` (session outranks env var), set COMFY_API_KEY, or pass --api-key. Get one at https://platform.comfy.org.[/dim]"
+        "[dim]Auth: run `comfy cloud login`, set COMFY_API_KEY (outranks the session), or pass --api-key. Get one at https://platform.comfy.org.[/dim]"
     )

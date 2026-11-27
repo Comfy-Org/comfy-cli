@@ -62,5 +62,114 @@
     "output_node": true,
     "api_node": true,
     "python_module": "nodes"
+  },
+  "ImageSrc": {
+    "input": {"required": {}},
+    "input_order": {"required": []},
+    "output": ["IMAGE"],
+    "output_name": ["IMAGE"],
+    "category": "image",
+    "display_name": "Image Source",
+    "description": "Synthetic IMAGE producer for autogrow slot-count tests.",
+    "output_node": false,
+    "python_module": "nodes"
+  },
+  "Sink": {
+    "input": {"optional": {"image": ["IMAGE", {}]}},
+    "input_order": {"optional": ["image"]},
+    "output": [],
+    "output_name": [],
+    "category": "image",
+    "display_name": "Sink",
+    "description": "Synthetic output node; its only input is optional so it validates alone.",
+    "output_node": true,
+    "python_module": "nodes"
+  },
+  "AutogrowTopNode": {
+    "input": {
+      "required": {
+        "images": [
+          "COMFY_AUTOGROW_V3",
+          {"template": {"input": {"required": {"image": ["IMAGE", {}]}}, "prefix": "image", "min": 2, "max": 4}}
+        ]
+      }
+    },
+    "input_order": {"required": ["images"]},
+    "output": ["IMAGE"],
+    "output_name": ["IMAGE"],
+    "category": "image",
+    "display_name": "Autogrow Top",
+    "description": "Synthetic top-level autogrow group with a min of 2 slots.",
+    "output_node": false,
+    "python_module": "nodes"
+  },
+  "AutogrowNestedNode": {
+    "input": {
+      "required": {
+        "model": [
+          "COMFY_DYNAMICCOMBO_V3",
+          {
+            "options": [
+              {
+                "key": "strict",
+                "inputs": {
+                  "required": {
+                    "refs": [
+                      "COMFY_AUTOGROW_V3",
+                      {"template": {"input": {"required": {"reference_image": ["IMAGE", {}]}}, "names": ["reference_1", "reference_2", "reference_3"], "min": 1}}
+                    ]
+                  },
+                  "optional": {}
+                }
+              },
+              {
+                "key": "strict_pair",
+                "inputs": {
+                  "required": {
+                    "refs": [
+                      "COMFY_AUTOGROW_V3",
+                      {"template": {"input": {"required": {"reference_image": ["IMAGE", {}]}}, "names": ["reference_1", "reference_2", "reference_3"], "min": 2}}
+                    ]
+                  },
+                  "optional": {}
+                }
+              },
+              {
+                "key": "lenient",
+                "inputs": {
+                  "required": {
+                    "refs": [
+                      "COMFY_AUTOGROW_V3",
+                      {"template": {"input": {"required": {"reference_image": ["IMAGE", {}]}}, "names": ["reference_1", "reference_2", "reference_3"], "min": 0}}
+                    ]
+                  },
+                  "optional": {}
+                }
+              },
+              {
+                "key": "optional_template",
+                "inputs": {
+                  "required": {
+                    "refs": [
+                      "COMFY_AUTOGROW_V3",
+                      {"template": {"input": {"optional": {"reference_image": ["IMAGE", {}]}}, "names": ["reference_1", "reference_2", "reference_3"], "min": 1}}
+                    ]
+                  },
+                  "optional": {}
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "input_order": {"required": ["model"]},
+    "output": ["IMAGE"],
+    "output_name": ["IMAGE"],
+    "category": "image",
+    "display_name": "Autogrow Nested",
+    "description": "Synthetic dynamic-combo node whose options nest autogrow sub-inputs.",
+    "output_node": false,
+    "python_module": "nodes"
   }
 }

@@ -26,8 +26,8 @@ From a snapshot or a scan:
 - **`notInRegistry`** — the pin names nothing the registry publishes. Correct it
   or drop the pack.
 - **`unresolvedNodes`** — every pack the definition cannot install, and a superset
-  of `notInRegistry` and `registryPending`. Read those two instead, or a publish
-  that is merely pending reads as a wrong pin.
+  of `notInRegistry` and `registryPending`. Its advisory line leaves out the packs
+  those two name, so a publish that is merely pending does not read as a wrong pin.
 - **`collidingNodes`** — a pack was left out because another claimed its folder.
   The build proceeds without it.
 - **`pythonSatisfied: false`** — no curated base image matches the scanned Python,
@@ -38,14 +38,15 @@ From a snapshot or a scan:
 - **`skippedPins`** — normal. The build owns those packages.
 - **`unpinnablePins`** — a package with no PyPI version to write: an editable or a
   direct URL. Not owned by the build, just undeclarable. A pack may still need it.
-- **`registryPending`** — the pin is right and not servable yet, so a retry later
-  works.
+- **`registryPending`** — the pin is right and not servable yet, so the import
+  left the pack out and importing again later works.
 - **`unverifiedPins`** — the registry never answered, so nothing was checked.
 
 From a workflow, six more:
 
 - **`unresolvedClasses`** — node classes nothing installable provides. The graph
-  will not run without them, so this is the list to take to the user.
+  will not run without them, so this is the list to take to the user. Don't write
+  node code into the build to stand in for them.
 - **`unknownClasses`** — the same classes with the closest pack the registry could
   name, rendered as `ClassName (maybe pack-id)`. A lead, not an answer.
 - **`uncheckedClasses`** — the registry never answered, so these packs are not in
@@ -72,28 +73,70 @@ with `--json`.
 ## A refusal is not a cut
 
 `push` and `release create` can reject a definition before anything is built, and
-the message names the field:
+the message names the field. `validate` and `push` check model entries first and
+refuse with `build_spec_invalid`, one line per entry and `details.invalid` as
+`{field, reason, model}`, before anything uploads. A local model's kept link is
+checked after `push` hashes its file, so it is reported once the other problems
+are fixed: a second refusal after a fix is that, not a new problem. What reaches the builder anyway
+comes back as **`build_definition_invalid`**. When the builder lists its reasons,
+they come one per line and in `details.invalid` (a list too long for the message
+stops on a whole line and ends `... and N more`; `details.invalid` holds every
+one); otherwise the reason is the builder's `message`, with no `details.invalid`.
+The same definition is refused the same way every
+time, so edit it rather than retrying. Its `models[<n>]` counts the spec as the
+last push wrote it, and under `push --release` each such line also names the
+model, as `details.invalid[].model` does in JSON. Two kinds of field are not the definition, and the message
+then says the builder refused the release. A `targets[<n>]` field is the n-th
+`--target` value (a repeated os/gpu pair, or one the builder cannot build): run
+the command again with the targets `comfy build refs build-targets` lists. A
+`blob:<id>` field (`not uploaded`, `unknown blob`, a size or content mismatch) is
+a model's file or a node's zip that never reached the builder whole: delete that
+`blobId` from its entry and run `comfy build push`, which uploads the file again,
+since a push skips an entry that has a `blobId`. A push uploads only a
+`source: local` entry, so one that had only the `blobId` needs `source: local`
+with a `localPath` (the model's file, the node's directory), or another source it
+can take (a model's `sourceUri`, a node's `registryVersion` or `repository`), first.
 
 - `must be a 64-character sha256` — a model entry's `sha256`. Correct it from the
   candidate you took it off rather than uploading anything.
 - `must set exactly one of sourceUri or blobId` — an entry has both or neither.
 - `resolves to a duplicate node directory` — two entries claim one folder, so one
   of them goes.
-- `build_registry_pin_missing` — the builder could not place a public pack.
-  The message names each identity; correct the `registryVersion` against a
-  registry search, or remove the pack.
+- `build_registry_pin_missing` — the builder could not place a public pack, or
+  the registry never answered for it (its `unverifiedPins`; retry later).
+  `push --dry-run` refuses the same way, before anything is uploaded or saved.
+  The message names each identity but not why. A version the registry has
+  Flagged lands here: check its `status` at
+  `https://api.comfy.org/nodes/<id>/versions`, and pin a version that is not
+  `NodeVersionStatusFlagged`, or the pack's `repository` and a commit `gitRef`.
+  Otherwise correct the `registryVersion` against a registry search, or remove
+  the pack.
 - `build_spec_stale` — the remote moved under you, or `--id` names a Build the
   spec's `syncedRevision` does not belong to. See *Revising*.
 
-Two refusals are the workspace being full rather than the definition being wrong,
-and neither is fixed by editing anything:
+- **`build_release_held`** — the save warned that a deployment could not download a
+  model link, so the push cut no release. Under `--json`, `details.warnings` names
+  each link and how its host refused; in text mode the tool printed each just above. Fix the link, or ask the user before passing
+  `--release-despite-warnings`.
 
+Three refusals are the workspace being full rather than the definition being wrong,
+and none is fixed by editing anything:
+
+- **`build_limit`**: the workspace holds its maximum number of builds, counting
+  every member's, though `comfy build ls` lists only your own outside the
+  enterprise plan. Deleting a build clears it, or a teammate deletes one of
+  theirs. A delete takes the build's releases with it, so ask the user first;
+  `comfy skills show comfy-build` carries the rules for it.
 - **`build_release_limit`** — the workspace holds its maximum number of releases.
-  A retry does not clear it; deleting one does. `comfy build release delete` is the
-  procedure, and `comfy skills show comfy-build` carries the rules for it.
+  A retry does not clear it; deleting one does. Under `--json`, `details.builds`
+  says which Builds hold releases and whether a deployment uses them,
+  `comfy build release ls --id <build>` lists one Build's, and
+  `comfy build quota` reads the limit, which comes from the plan. `comfy build
+  release delete` is the procedure, and `comfy skills show comfy-build` carries
+  the rules for it.
 - **`429 CONCURRENCY_LIMIT`**, which arrives as `build_builder_error` with the
   builder's own message — too many builds running at once. Transient, unlike the
-  one above. Wait for one to finish, or say which are running.
+  two above. Wait for one to finish, or say which are running.
 
 ## A cut that failed after the request went out
 
@@ -120,6 +163,22 @@ several symptoms: three packs failing to import can be one wrong pin. Fix that
 cause completely, in one cut. Do not split its edits across cuts, and do not guess
 at a second cause in the same cut. Before each new cut, tell the user the cause,
 the exact edit, and which build this is, and wait.
+
+**A missing import needs an installation mechanism before another cut.** Read
+the selected pack's verified source and declared requirements, or establish a
+supported builder installation path. A `name==version` pin in `pipDependencies`
+forces the version of a package something else installs; adding
+`PyYAML==<version>` does not by itself install a missing `yaml` import. The
+builder installs two kinds of line on their own: a wheel by its address
+(`name @ https://.../name-1.0-py3-none-any.whl`), and an exact, unmarked
+`nvidia-vfx==<version>` pin. First
+verify what will install the package, then select a compatible constraint if
+needed. A changed local source bundle also needs approval for its changed
+contents and bytes before upload.
+When no verified installation mechanism exists, report that blocker and ask for
+the missing source or supported installation choice. Do not propose or create a
+fresh paid cut merely to try an otherwise unsupported pin, even if the previous
+repair plan was approved.
 
 **Read in this order.**
 

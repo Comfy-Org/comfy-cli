@@ -32,10 +32,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import http.server
 import json
 import secrets
 import socket
+import ssl
 import threading
 import time
 import urllib.parse
@@ -43,7 +45,7 @@ import urllib.request
 import webbrowser
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError, URLError
 
 from comfy_cli.cloud import (
@@ -53,6 +55,11 @@ from comfy_cli.cloud import (
     get_base_url,
 )
 from comfy_cli.http import NoRedirectHandler, build_http_only_opener
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from comfy_cli.auth.store import CloudSession
 
 # ---------------------------------------------------------------------------
 # Error types — caller maps these to renderer.error(code=...) codes.
@@ -88,6 +95,23 @@ class OAuthRefreshError(OAuthError):
 
 class OAuthTimeout(OAuthError):
     code = "oauth_timeout"
+
+
+class SessionNotSaved(OSError):
+    """A refresh succeeded but its tokens could not be stored, so the stored refresh token is spent."""
+
+
+class SessionReplaced(Exception):
+    """The stored sign-in is not the one ``ensure_fresh_session(expect=...)`` was asked to refresh.
+
+    Raised before anything is refreshed, persisted or cleared, so another
+    sign-in stored while the caller waited is left exactly as it was.
+    ``session`` is the sign-in found in its place.
+    """
+
+    def __init__(self, session: CloudSession) -> None:
+        super().__init__("the stored sign-in was replaced by another")
+        self.session = session
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +594,7 @@ def refresh_tokens(
     refresh_token: str,
     resource: str | None = None,
     scopes: tuple[str, ...] | None = None,
+    timeout: float = _HTTP_TIMEOUT_S,
 ) -> TokenSet:
     body = {
         "grant_type": "refresh_token",
@@ -581,22 +606,41 @@ def refresh_tokens(
     if scopes:
         body["scope"] = " ".join(scopes)
     try:
-        resp = _post_form(f"{base_url}/oauth/token", body)
+        resp = _post_form(f"{base_url}/oauth/token", body, timeout=timeout)
     except _HTTPFail as e:
         raise OAuthRefreshError(
             f"refresh failed: {e}",
             hint="run `comfy cloud login` to sign in again",
-            details={"status": e.status, "body": e.body},
+            details={"status": e.status, "body": e.body, "retryable": e.retryable},
         ) from None
     return _token_set_from_response(resp)
 
 
+# Bounded in-lock retry of a *transient* refresh failure. The server may have
+# rotated the token before the response was lost (timeout / reset / 5xx); a
+# replay of that token is answered with a fresh successor only while it is
+# inside the server's reuse-grace window, and kills the whole family outside
+# it. So re-send it now, while we still hold the lock, rather than leaving the
+# consumed token on disk for the next command (or the reactive 401 path) to
+# replay minutes later.
+_REFRESH_RETRY_DELAYS_S = (2.0, 4.0, 8.0)
+# Cap on the retry phase (sleeps + retry POSTs), measured from the first
+# failure. Each retry POST's socket timeout is clamped to what is left, so the
+# cap holds when attempts time out on connect or on a silent read. urllib's
+# timeout is per socket operation, not a whole-request deadline, so a server
+# that keeps trickling bytes can still stretch one POST past it.
+_REFRESH_RETRY_BUDGET_S = 40.0
+# Don't start a retry POST with less than this left — it could not complete.
+_REFRESH_RETRY_MIN_ATTEMPT_S = 5.0
+
 # Upper bound on how long a waiter blocks for the refresh lock. The holder
-# only keeps it for one token POST (``_HTTP_TIMEOUT_S`` = 30s), so this leaves
-# headroom for that round-trip plus the read-modify-write. If it's ever
-# exceeded (a wedged peer) we fall back to whatever is persisted rather than
-# racing an in-flight refresh.
-_REFRESH_LOCK_TIMEOUT_S = 45.0
+# keeps it for one token POST (``_HTTP_TIMEOUT_S`` = 30s) plus, on a transient
+# failure, the retry phase (``_REFRESH_RETRY_BUDGET_S`` = 40s), so this leaves
+# headroom for that plus the read-modify-write. If it's ever exceeded (a wedged
+# peer) we fall back to whatever is persisted rather than racing an in-flight
+# refresh.
+_REFRESH_LOCK_TIMEOUT_S = 90.0
+_SAVE_RETRY_DELAY_S = 0.25
 
 # OAuth2 token-endpoint error codes that mean the refresh-token *family* is
 # truly dead — only a fresh ``comfy cloud login`` can recover, so we clear the
@@ -630,6 +674,66 @@ def _is_fatal_token_error(exc: OAuthRefreshError) -> bool:
     if "reuse" in blob:
         return True
     return any(code in blob for code in _FATAL_TOKEN_ERROR_CODES)
+
+
+def _is_transient_refresh_error(exc: OAuthRefreshError) -> bool:
+    """True when a refresh failure is worth re-sending the *same* refresh token.
+
+    Transient = no HTTP response at all (status 0: connect/read timeout, reset,
+    DNS), 408, or any 5xx. A terminal token error (``invalid_grant`` /
+    ``invalid_token`` / reuse) is never transient, whatever its status; other
+    4xx (``invalid_client``, ``invalid_request``, ...) won't change on a retry.
+    429 is left out on purpose: the server has told us to back off and did not
+    process (so did not rotate) the token, so the next command can safely retry.
+    A local refusal that can never succeed (plaintext URL, TLS verification
+    failure) is marked ``retryable=False`` and skipped too.
+    """
+    if _is_fatal_token_error(exc):
+        return False
+    if exc.details.get("retryable") is False:
+        return False
+    status = exc.details.get("status")
+    if not isinstance(status, int):
+        return False
+    return status in (0, 408) or status >= 500
+
+
+def _refresh_with_retry(
+    *,
+    base_url: str,
+    client_id: str,
+    refresh_token: str,
+    resource: str | None = None,
+) -> TokenSet:
+    """``refresh_tokens`` with a bounded retry on transient failures.
+
+    Must be called while holding the refresh lock: it re-sends the same refresh
+    token, which is only safe because no peer can spend it concurrently. Raises
+    the last ``OAuthRefreshError`` once retries are exhausted (or immediately
+    for a non-transient one).
+    """
+    kwargs = {"base_url": base_url, "client_id": client_id, "refresh_token": refresh_token, "resource": resource}
+    try:
+        return refresh_tokens(**kwargs)
+    except OAuthRefreshError as e:
+        if not _is_transient_refresh_error(e):
+            raise
+        last_error = e
+    deadline = time.monotonic() + _REFRESH_RETRY_BUDGET_S
+    for delay in _REFRESH_RETRY_DELAYS_S:
+        if deadline - time.monotonic() - delay < _REFRESH_RETRY_MIN_ATTEMPT_S:
+            break
+        time.sleep(delay)
+        remaining = deadline - time.monotonic()
+        if remaining < _REFRESH_RETRY_MIN_ATTEMPT_S:
+            break  # the sleep overran (loaded host, suspended process)
+        try:
+            return refresh_tokens(**kwargs, timeout=min(_HTTP_TIMEOUT_S, remaining))
+        except OAuthRefreshError as e:
+            if not _is_transient_refresh_error(e):
+                raise
+            last_error = e
+    raise last_error
 
 
 # The reason from the most recent fatal refresh, stashed per-thread so the
@@ -677,7 +781,14 @@ def take_last_fatal_refresh_reason() -> str | None:
     return reason
 
 
-def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear: bool = True):
+def ensure_fresh_session(
+    *,
+    leeway_s: int = 60,
+    force: bool = False,
+    allow_clear: bool = True,
+    expect: Callable[[CloudSession], bool] | None = None,
+    rejected_access_token: str | None = None,
+):
     """Return the stored cloud session, refreshing it first when the access
     token is expired (or within ``leeway_s`` of expiring) and a refresh token
     is available.
@@ -698,6 +809,10 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
     ``expires_at`` recorded — still thinks it is valid. The refresh token is
     still required; without one this is a no-op.
 
+    ``rejected_access_token`` identifies the token that received the 401. If a
+    peer already replaced it, adopt that session instead of refreshing again.
+    This also covers a late 401 that arrives after the peer released the lock.
+
     ``allow_clear=False`` keeps the stored session on disk even when a refresh
     hits a fatal token error (reuse-detection / ``invalid_grant``). Background,
     read-mostly callers (the detached ``comfy run`` watcher) pass this so a
@@ -705,6 +820,13 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
     can never wipe the login out from under the foreground command that owns the
     session lifecycle. The refresh still returns ``None`` so the caller knows it
     could not freshen the token; it just declines to destroy the shared session.
+
+    ``expect`` is for a caller bound to one sign-in (an upload finished as the
+    account that started it). It is called with the stored session on the first
+    read and again under the lock, before any refresh, persist or clear; when it
+    returns ``False`` another sign-in replaced that one (``comfy cloud login`` in
+    another shell), so :class:`SessionReplaced` is raised and the store is left
+    untouched. Without it every stored session is refreshed, as before.
 
     Concurrency: the auth server rotates the refresh token on every refresh and
     invalidates the old one. A parallel ``comfy run`` fan-out (plus background
@@ -719,6 +841,8 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
     from comfy_cli.auth import store as auth_store
 
     session = auth_store.get_cloud_session()
+    if session is not None and expect is not None and not expect(session):
+        raise SessionReplaced(session)
     if session is None or not session.refresh_token:
         return session
     if not force and not session.is_expired(leeway_s=leeway_s):
@@ -740,6 +864,8 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
                 leeway_s=leeway_s,
                 force=force,
                 allow_clear=allow_clear,
+                expect=expect,
+                rejected_access_token=rejected_access_token,
             )
     except TimeoutError:
         # A peer has held the lock longer than a refresh should take. Don't
@@ -752,7 +878,16 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
         return session
 
 
-def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, force: bool, allow_clear: bool = True):
+def _locked_refresh(
+    auth_store,
+    *,
+    observed_refresh_token: str,
+    leeway_s: int,
+    force: bool,
+    allow_clear: bool = True,
+    expect: Callable[[CloudSession], bool] | None = None,
+    rejected_access_token: str | None = None,
+):
     """Decide → POST → persist, executed while holding the secrets lock.
 
     Re-reads the persisted session first (double-checked locking): if a peer
@@ -760,14 +895,32 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
     one rather than spending the now-consumed token we observed before locking.
     """
     session = auth_store.get_cloud_session()
+    # Checked under the lock: another login stored since the first read is
+    # neither refreshed nor cleared on this caller's behalf.
+    if session is not None and expect is not None and not expect(session):
+        raise SessionReplaced(session)
     if session is None or not session.refresh_token:
+        return session
+
+    # The rejected request may have been in flight while a peer finished its
+    # refresh, before even our first store read. Don't rotate that peer's token
+    # again just because this client's older request was refused.
+    if (
+        rejected_access_token is not None
+        and session.access_token != rejected_access_token
+        and session.expires_at is not None
+        and not session.is_expired(leeway_s=leeway_s)
+    ):
         return session
 
     # Double-check after acquiring the lock. A peer may have refreshed while we
     # blocked: if the stored refresh token rotated away from what we observed
     # before locking, the family already advanced — use it, never re-send the
     # consumed token (that is exactly what trips reuse-detection).
-    if session.refresh_token != observed_refresh_token:
+    # A usable reactive peer already returned above. Otherwise refresh its
+    # current family, never replaying the older token observed before locking.
+    # Ordinary proactive callers still coalesce on any peer rotation.
+    if session.refresh_token != observed_refresh_token and rejected_access_token is None:
         return session
     if not force and not session.is_expired(leeway_s=leeway_s):
         # Peer advanced the access token's expiry without us noticing a token
@@ -777,7 +930,7 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
     from comfy_cli.cloud import CLIENT_ID, get_resource_url
 
     try:
-        new_tokens = refresh_tokens(
+        new_tokens = _refresh_with_retry(
             base_url=session.base_url,
             client_id=session.client_id or CLIENT_ID,
             refresh_token=session.refresh_token,
@@ -805,7 +958,9 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
             if allow_clear:
                 auth_store.clear_cloud_session()
             return None
-        return session  # transient (network) — keep the stale session
+        # Transient (network / 5xx) even after the in-lock retries, or a
+        # non-fatal 4xx — keep the stale session.
+        return session
     except Exception:  # noqa: BLE001 — any other error is best-effort
         return session
 
@@ -822,16 +977,25 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
     # fresh access token and degrades to a clean re-login when it expires,
     # rather than tripping reuse-detection mid-use.
     _last_fatal.reason = None  # success — drop any reason from an earlier attempt
-    return auth_store.save_cloud_session(
-        base_url=session.base_url,
-        resource=session.resource,
-        client_id=session.client_id,
-        scope=session.scope,
-        access_token=new_tokens.access_token,
-        refresh_token=new_tokens.refresh_token,
-        token_type=new_tokens.token_type,
-        expires_at=new_tokens.expires_at,
-    )
+    rotated = {
+        "base_url": session.base_url,
+        "resource": session.resource,
+        "client_id": session.client_id,
+        "scope": session.scope,
+        "access_token": new_tokens.access_token,
+        "refresh_token": new_tokens.refresh_token,
+        "token_type": new_tokens.token_type,
+        "expires_at": new_tokens.expires_at,
+        "keep_partner_node_token": True,
+    }
+    try:
+        return auth_store.save_cloud_session(**rotated)
+    except OSError:
+        time.sleep(_SAVE_RETRY_DELAY_S)
+    try:
+        return auth_store.save_cloud_session(**rotated)
+    except OSError as error:
+        raise SessionNotSaved(str(error)) from error
 
 
 # ---------------------------------------------------------------------------
@@ -840,9 +1004,12 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
 
 
 class _HTTPFail(Exception):
-    def __init__(self, status: int, body: str):
+    def __init__(self, status: int, body: str, *, retryable: bool = True):
         self.status = status
         self.body = body
+        # False for a local, deterministic refusal (plaintext URL, TLS
+        # verification) that re-sending the request can never fix.
+        self.retryable = retryable
         super().__init__(f"HTTP {status}: {body[:200]}")
 
 
@@ -857,7 +1024,7 @@ def _post_json(url: str, body: dict) -> dict:
     return _send_and_parse(req)
 
 
-def _post_form(url: str, body: dict) -> dict:
+def _post_form(url: str, body: dict, *, timeout: float = _HTTP_TIMEOUT_S) -> dict:
     data = urllib.parse.urlencode(body).encode("ascii")
     req = urllib.request.Request(
         url,
@@ -868,7 +1035,7 @@ def _post_form(url: str, body: dict) -> dict:
             "Accept": "application/json",
         },
     )
-    return _send_and_parse(req)
+    return _send_and_parse(req, timeout=timeout)
 
 
 def _assert_https_or_loopback(url: str) -> None:
@@ -882,22 +1049,34 @@ def _assert_https_or_loopback(url: str) -> None:
     host = (parsed.hostname or "").lower()
     if host in {"localhost", "127.0.0.1", "::1"}:
         return
-    raise _HTTPFail(0, f"refusing plaintext HTTP for OAuth endpoint: {url}")
+    raise _HTTPFail(0, f"refusing plaintext HTTP for OAuth endpoint: {url}", retryable=False)
 
 
 _OAUTH_OPENER = build_http_only_opener(NoRedirectHandler())
 
 
-def _send_and_parse(req: urllib.request.Request) -> dict:
+def _send_and_parse(req: urllib.request.Request, *, timeout: float = _HTTP_TIMEOUT_S) -> dict:
     _assert_https_or_loopback(req.full_url)
     try:
-        with _OAUTH_OPENER.open(req, timeout=_HTTP_TIMEOUT_S) as resp:
+        with _OAUTH_OPENER.open(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace") or "{}"
             return json.loads(raw)
     except HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else ""
+        try:
+            body = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else ""
+        except (OSError, http.client.HTTPException):
+            body = ""  # the status is what matters; don't lose it to a bad body read
         raise _HTTPFail(e.code, body) from None
     except URLError as e:
-        raise _HTTPFail(0, str(e)) from None
+        verify_failed = isinstance(e.reason, ssl.SSLCertVerificationError)
+        raise _HTTPFail(0, str(e), retryable=not verify_failed) from None
+    except (OSError, http.client.HTTPException) as e:
+        # A read timeout / reset / truncated body *after* the request was sent
+        # (urllib only wraps connect-phase errors in URLError, and
+        # ``IncompleteRead`` / ``BadStatusLine`` are not OSErrors). This is
+        # exactly the "server rotated the token but the response was lost" case,
+        # so surface it as a no-response failure the refresh retry can see.
+        verify_failed = isinstance(e, ssl.SSLCertVerificationError)
+        raise _HTTPFail(0, f"{type(e).__name__}: {e}", retryable=not verify_failed) from None
     except json.JSONDecodeError as e:
         raise _HTTPFail(200, f"non-JSON response body: {e}") from None

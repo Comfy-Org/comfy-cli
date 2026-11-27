@@ -33,9 +33,20 @@ a second implementation of widget order is a second answer, and the two would
 diverge silently — as a wrong index, i.e. a widget value written into the wrong
 field of the user's canvas.
 
-WHAT IT IS NOT. It is not ``object_info``. It carries no types, no defaults, no
-enum choices, no descriptions — only what a name↔index converter needs. That
-keeps it small enough to hand to a sidecar on every call.
+WHAT IT IS NOT. It is not ``object_info``. It carries no types, no enum
+choices, no descriptions — only what a name↔index converter needs. That keeps
+it small enough to hand to a sidecar on every call. The one exception is a
+dynamic combo's per-option ``defaults``: ``widget_order`` is value-blind (first
+key only), so ``dynamic_combos`` names every option's slots and the values a
+fresh selection seeds them with — what the frontend does on a selection change
+(``dynamicWidgets.ts``), and what a converter needs to handle any other key.
+
+Dynamic groups publish a row-count controller in ``widget_order`` and a
+``dynamic_groups`` map containing each template's relative widget names,
+defaults, and min/max. Replace the default row span with the saved count when
+mapping positional values; the controller itself is never a prompt input.
+A class whose DynamicGroup schema the CLI refuses is left out of ``types`` and
+named in a ``dynamic_group_unsupported`` warning instead.
 
 SHAPE (``envelope/1`` ``data`` of ``comfy nodes widget-catalog``)::
 
@@ -51,6 +62,12 @@ SHAPE (``envelope/1`` ``data`` of ``comfy nodes widget-catalog``)::
         "ImageBatchMulti": {
           "widget_order": ["inputcount"],
           "inputcount": {"widget": "inputcount", "elements": ["image"]}
+        },
+        "MagnificImageSkinEnhancerNode": {
+          "widget_order": ["sharpen", "smart_grain", "mode"],
+          "dynamic_combos": {"mode": {"default": "creative", "options": {
+            "creative": {"widgets": [], "defaults": {}},
+            "faithful": {"widgets": ["mode.skin_detail"], "defaults": {"mode.skin_detail": 80}}}}}
         }
       }
     }
@@ -72,22 +89,34 @@ from typing import Any
 CATALOG_VERSION_PREFIX = "sha256:"
 
 
-def build_types(graph) -> dict[str, dict[str, Any]]:
+def build_types(graph, skipped: dict[str, str] | None = None) -> dict[str, dict[str, Any]]:
     """The ``types`` map: one entry per class the graph knows, in class order.
 
     Every class gets an entry, including widget-less ones (``VAEDecode`` →
     ``{"widget_order": []}``). A missing entry and an empty order are different
     statements — "I have never heard of this class" vs. "this class has no
     widgets" — and a converter must be able to tell them apart.
+
+    The one exception is a class whose DynamicGroup schema this CLI refuses: it
+    is left out, and the reason goes into ``skipped``. A consumer stores an
+    uncatalogued class's values opaquely and refuses writes to them, which is
+    safe; one unsupported custom node must not take down every other class.
+    Workflows that use the class still get the refusal from conversion and edits.
     """
     # Imported inside the function: workflow_ops sits above cql in the import
     # graph (it consumes cql.engine), so a module-level import here would make
     # the dependency circular.
+    from comfy_cli.cql.engine import DynamicGroupBindingError, _dynamic_group_widgets, _widget_default
     from comfy_cli.workflow_ops import INPUTCOUNT_WIDGET, inputcount_family_elements
 
     types: dict[str, dict[str, Any]] = {}
     for m in graph.all_nodes():
-        entry: dict[str, Any] = {"widget_order": list(graph.widget_order_default(m.id))}
+        try:
+            entry: dict[str, Any] = {"widget_order": list(graph.widget_order_default(m.id))}
+        except DynamicGroupBindingError as e:
+            if skipped is not None:
+                skipped[m.id] = str(e)
+            continue
 
         # V3 autogrow (COMFY_AUTOGROW_V3): one declared input, one wire slot per
         # connection (`images` → `images.image0`, `images.image1`, …). The
@@ -105,6 +134,24 @@ def build_types(graph) -> dict[str, dict[str, Any]]:
         if elements:
             entry["inputcount"] = {"widget": INPUTCOUNT_WIDGET, "elements": elements}
 
+        # Dynamic combos: every option's slots, not just the first key the
+        # value-blind ``widget_order`` expands (see Graph.dynamic_combo_options).
+        combos = graph.dynamic_combo_options(m.id)
+        if combos:
+            entry["dynamic_combos"] = combos
+
+        groups = {
+            p.name: {
+                "min": p.options.min if p.options.min is not None else 0,
+                "max": p.options.max if p.options.max is not None else 20,
+                "widgets": [f.name for f in _dynamic_group_widgets(p)],
+                "defaults": {f.name: _widget_default(f) for f in _dynamic_group_widgets(p)},
+            }
+            for p in m.inputs
+            if p.is_dynamic_group
+        }
+        if groups:
+            entry["dynamic_groups"] = groups
         types[m.id] = entry
     return types
 
@@ -122,9 +169,16 @@ def catalog_version(types: dict[str, Any]) -> str:
 
 def build_catalog(graph) -> dict[str, Any]:
     """The full emitted payload — ``types`` plus its pin and cardinality."""
-    types = build_types(graph)
-    return {
+    skipped: dict[str, str] = {}
+    types = build_types(graph, skipped)
+    payload: dict[str, Any] = {
         "catalog_version": catalog_version(types),
         "class_count": len(types),
         "types": types,
     }
+    if skipped:
+        payload["warnings"] = [
+            {"code": "dynamic_group_unsupported", "message": f"{class_type} left out: {reason}"}
+            for class_type, reason in skipped.items()
+        ]
+    return payload

@@ -190,6 +190,201 @@ def test_ls_limit_applies_after_filter(gallery_file):
     assert env["data"]["shown"] == 1
 
 
+# The gallery spells model versions without a space ("Wan2.2") while users and
+# agents write them with one ("Wan 2.2").
+_SEPARATOR_FIXTURE = [
+    {
+        "title": "Video",
+        "type": "video",
+        "templates": [
+            {"name": "video_wan2_2_14B_t2v", "title": "Wan 2.2 Text to Video", "tags": [], "models": ["Wan2.2"]},
+            {"name": "video_wan2_1_vace", "title": "Wan 2.1 VACE", "tags": [], "models": ["Wan2.1 VACE"]},
+            {"name": "image_z_image_turbo", "title": "Z Image Turbo", "tags": [], "models": ["Z-Image-Turbo"]},
+        ],
+    }
+]
+
+
+def _ls_names(tmp_path: Path, *args: str) -> list[str]:
+    path = tmp_path / "index.json"
+    path.write_text(json.dumps(_SEPARATOR_FIXTURE))
+    _force_json_renderer()
+    result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", str(path), *args])
+    assert result.exit_code == 0, result.output
+    return [r["name"] for r in _envelope(result.output)["data"]["rows"]]
+
+
+@pytest.mark.parametrize("query", ["Wan 2.2", "wan2.2", "WAN-2.2", "wan_2_2"])
+def test_ls_model_filter_ignores_separators(tmp_path, query):
+    assert _ls_names(tmp_path, "--model", query) == ["video_wan2_2_14B_t2v"]
+
+
+def test_ls_model_filter_still_matches_a_plain_prefix(tmp_path):
+    assert _ls_names(tmp_path, "--model", "Wan") == ["video_wan2_2_14B_t2v", "video_wan2_1_vace"]
+
+
+def test_ls_name_filter_ignores_separators(tmp_path):
+    """`z image` finds `image_z_image_turbo`; the name uses underscores."""
+    assert _ls_names(tmp_path, "--name", "z image turbo") == ["image_z_image_turbo"]
+
+
+def test_get_where_model_ignores_separators(tmp_path, monkeypatch):
+    """`templates get` resolves through the same predicate, so it must agree with `ls`."""
+    path = tmp_path / "index.json"
+    path.write_text(json.dumps(_SEPARATOR_FIXTURE))
+    monkeypatch.setattr(templates_cmd, "_fetch_template_workflow", lambda name, timeout=15.0: b'{"nodes": []}')
+    _force_json_renderer()
+    result = CliRunner().invoke(templates_cmd.app, ["get", "--gallery", str(path), "--where", "model=Wan 2.2"])
+    assert result.exit_code == 0, result.output
+    assert _envelope(result.output)["data"]["name"] == "video_wan2_2_14B_t2v"
+
+
+# The gallery names the base model in `models` and the variant ("Lite",
+# "Turbo", "ControlNet") only in the title, tags or template name. Entries are
+# copied from the live gallery's shape.
+_VARIANT_FIXTURE = [
+    {
+        "title": "Image",
+        "type": "image",
+        "templates": [
+            {
+                "name": "api_bytedance_seedream_5_0_lite_image_edit",
+                "title": "Seedream 5.0 Lite: Image Edit",
+                "tags": ["API", "Image Edit"],
+                "models": ["Seedream 5.0"],
+            },
+            {
+                "name": "api_bytedance_seedream_5_0_flash_t2i",
+                "title": "Seedream 5.0 Flash: Text to Image",
+                "tags": ["API", "Text to Image"],
+                "models": ["Seedream 5.0"],
+            },
+            {"name": "image_krea2_turbo_t2i", "title": "Krea-2: Text to Image", "tags": [], "models": ["Krea 2"]},
+            {"name": "api_krea3_t2i", "title": "Krea 3: Text to Image", "tags": ["API"], "models": ["Krea 3"]},
+            {
+                "name": "image_qwen_image_instantx_controlnet",
+                "title": "Qwen-Image InstantX Union ControlNet",
+                "tags": ["Image", "ControlNet"],
+                "models": ["Qwen-Image"],
+            },
+            {
+                "name": "image_qwen_image_2_1_t2i",
+                "title": "Qwen Image 2.1: Text to Image",
+                "tags": ["Text to Image"],
+                "models": ["Qwen Image 2.1"],
+            },
+            {
+                "name": "api_nano_banana_pro_t2i",
+                "title": "Nano Banana Pro: Text to Image",
+                "tags": ["API"],
+                "models": ["Nano Banana Pro"],
+            },
+            {
+                "name": "api_nano_banana_2_t2i",
+                "title": "Nano Banana 2: Text to Image",
+                "tags": ["API"],
+                "models": ["Nano Banana 2"],
+            },
+        ],
+    }
+]
+
+
+def _ls_variant(tmp_path: Path, model: str) -> list[str]:
+    """Names `templates ls --model <model>` returns over `_VARIANT_FIXTURE`."""
+    path = tmp_path / "index.json"
+    path.write_text(json.dumps(_VARIANT_FIXTURE))
+    _force_json_renderer()
+    result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", str(path), "--model", model])
+    assert result.exit_code == 0, result.output
+    return [r["name"] for r in _envelope(result.output)["data"]["rows"]]
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("Seedream 5.0 Lite", ["api_bytedance_seedream_5_0_lite_image_edit"]),
+        ("krea 2 turbo", ["image_krea2_turbo_t2i"]),
+        ("Qwen Image ControlNet", ["image_qwen_image_instantx_controlnet"]),
+    ],
+)
+def test_ls_model_finds_a_variant_named_outside_the_model_list(tmp_path, query, expected):
+    """The base model is in `models`; the variant word is only in the title, tags or name."""
+    assert _ls_variant(tmp_path, query) == expected
+
+
+def test_ls_model_variant_words_must_be_whole_words(tmp_path):
+    """`Nano Banana 2` must not match `nano_banana_pro_t2i` through the `2` in `t2i`."""
+    assert _ls_variant(tmp_path, "Nano Banana 2") == ["api_nano_banana_2_t2i"]
+
+
+def _ls_rows(tmp_path: Path, templates: list[dict], model: str) -> list[str]:
+    """Names `templates ls --model <model>` returns over a one-category gallery of ``templates``."""
+    path = tmp_path / "index.json"
+    path.write_text(json.dumps([{"title": "Image", "type": "image", "templates": templates}]))
+    _force_json_renderer()
+    result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", str(path), "--model", model])
+    assert result.exit_code == 0, result.output
+    return [r["name"] for r in _envelope(result.output)["data"]["rows"]]
+
+
+def test_ls_model_variant_words_come_from_one_model(tmp_path):
+    """`Nano Banana Pro` must not pool "Nano Banana 2" and "Gemini-3.1-Pro" from one template."""
+    templates = [
+        {
+            "name": "template_product_placement",
+            "title": "Product Placement",
+            "tags": [],
+            "models": ["Gemini-3.1-Pro", "Nano Banana 2"],
+        },
+    ]
+    assert _ls_rows(tmp_path, templates, "Nano Banana Pro") == []
+
+
+def test_ls_model_a_number_in_the_template_name_is_not_a_version(tmp_path):
+    """`Nano Banana 2` must not match a Nano Banana Pro template through the `2` in `photo_2`."""
+    templates = [
+        {
+            "name": "api_from_photo_2_miniature",
+            "title": "Photo to Blueprint",
+            "tags": [],
+            "models": ["Nano Banana Pro"],
+        },
+    ]
+    assert _ls_rows(tmp_path, templates, "Nano Banana 2") == []
+
+
+def test_ls_model_a_version_in_the_title_counts(tmp_path):
+    """`2511` is not in the model name "Qwen-Image-Edit", but the title states it."""
+    templates = [
+        {
+            "name": "image_qwen_image_edit_2511",
+            "title": "Qwen Image Edit 2511 - Material Replacement",
+            "tags": [],
+            "models": ["Qwen-Image-Edit"],
+        },
+    ]
+    assert _ls_rows(tmp_path, templates, "Qwen Image Edit 2511") == ["image_qwen_image_edit_2511"]
+
+
+def test_ls_model_still_needs_a_word_from_the_model_list(tmp_path):
+    """Words found only in titles are not a model filter: `Text Image` names no model."""
+    assert _ls_variant(tmp_path, "Text Image") == []
+
+
+def test_ls_model_with_a_word_no_template_has_finds_nothing(tmp_path):
+    """Every word must be found: no template says `Ultra`."""
+    assert _ls_variant(tmp_path, "Seedream 5.0 Ultra") == []
+
+
+def test_ls_model_whole_query_inside_a_model_name_is_unchanged(tmp_path):
+    """A query one model name contains still takes the plain substring path."""
+    assert _ls_variant(tmp_path, "Seedream 5.0") == [
+        "api_bytedance_seedream_5_0_lite_image_edit",
+        "api_bytedance_seedream_5_0_flash_t2i",
+    ]
+
+
 def test_show_returns_full_template(gallery_file):
     _force_json_renderer()
     runner = CliRunner()
@@ -1564,3 +1759,425 @@ def test_ls_self_heals_from_a_cache_poisoned_by_an_older_build(cache_file, monke
     assert result.exit_code == 0, result.output
     assert _envelope(result.output)["data"]["total_in_gallery"] > 0
     assert json.loads(cache_file.read_bytes()) == FIXTURE  # healed on disk too
+
+
+# ---------------------------------------------------------------------------
+# _workflow_node_types — corrupt definitions containers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "definitions",
+    [5, "definitions", ["x"], {"subgraphs": 5}, {"subgraphs": "abc"}],
+    ids=["int", "str", "list", "non-list-subgraphs", "str-subgraphs"],
+)
+def test_workflow_node_types_tolerates_corrupt_definitions(definitions):
+    """A wrong-typed ``definitions``/``subgraphs`` reads as "no definitions".
+
+    ``or`` only replaced falsy values, so a truthy wrong-typed one reached
+    ``.get``/the loop and raised. Top-level nodes are still collected.
+    """
+    wf = {"nodes": [{"id": 1, "type": "KSampler"}], "definitions": definitions}
+    assert templates_cmd._workflow_node_types(wf) == {"KSampler"}
+
+
+def test_workflow_node_types_still_reads_well_formed_subgraph_nodes():
+    """Positive control: the shape checks must not cost the happy path."""
+    wf = {
+        "nodes": [{"id": 1, "type": "KSampler"}],
+        "definitions": {"subgraphs": [{"id": "u1", "nodes": [{"id": 9, "type": "CLIPTextEncode"}]}]},
+    }
+    assert templates_cmd._workflow_node_types(wf) == {"KSampler", "CLIPTextEncode"}
+
+
+@pytest.mark.parametrize("nodes", [5, True, "abc"], ids=["int", "bool", "str"])
+def test_workflow_node_types_skips_a_subgraph_with_non_list_nodes(nodes):
+    """A truthy non-list per-subgraph ``nodes`` is skipped, not iterated."""
+    wf = {
+        "nodes": [{"id": 1, "type": "KSampler"}],
+        "definitions": {
+            "subgraphs": [{"id": "bad", "nodes": nodes}, {"id": "u1", "nodes": [{"id": 9, "type": "VAEDecode"}]}]
+        },
+    }
+    assert templates_cmd._workflow_node_types(wf) == {"KSampler", "VAEDecode"}
+
+
+# ---------------------------------------------------------------------------
+# templates ls --local-only / --runnable
+# ---------------------------------------------------------------------------
+
+
+def _count_workflow_fetches(monkeypatch, body_by_name=None, fail_names=None):
+    """Stub `_fetch_template_workflow` with a call counter.
+
+    `body_by_name` maps name -> bytes (default: a trivial zero-node workflow);
+    `fail_names` are names whose fetch raises an upstream 404.
+    """
+    import urllib.error
+
+    calls = {"count": 0, "names": []}
+    fail_names = set(fail_names or [])
+
+    def _impl(name, *args, **kwargs):
+        calls["count"] += 1
+        calls["names"].append(name)
+        if name in fail_names:
+            raise urllib.error.HTTPError(url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+        if body_by_name and name in body_by_name:
+            return body_by_name[name]
+        return json.dumps({"nodes": []}).encode()
+
+    monkeypatch.setattr(templates_cmd, "_fetch_template_workflow", _impl)
+    return calls
+
+
+def _count_folder_listings(monkeypatch, mapping):
+    """Stub `_list_local_folder` with a per-folder call counter."""
+    calls = {"count": 0, "folders": []}
+
+    def _impl(target, folder):
+        calls["count"] += 1
+        calls["folders"].append(folder)
+        return mapping.get(folder)
+
+    monkeypatch.setattr(templates_cmd, "_list_local_folder", _impl)
+    return calls
+
+
+def _run_ls(gallery_file, tmp_path, monkeypatch, extra):
+    # Isolate the on-disk per-template workflow cache so tests never read/write real cache.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    return CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, *extra])
+
+
+def test_ls_local_only_drops_api_rows_without_any_fetch(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    fetches = _count_workflow_fetches(monkeypatch)
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--local-only"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    names = [r["name"] for r in env["data"]["rows"]]
+    # image_flux2 + gsc_starter_1 both carry the API tag → dropped; image_z_image stays.
+    assert names == ["image_z_image"]
+    # `matched` counts the flag-filter survivors, unchanged by the pre-filter.
+    assert env["data"]["matched"] == 3
+    assert env["data"]["shown"] == 1
+    assert env["data"]["local_only"] is True
+    # The two API rows removed by the pre-filter are counted separately from truncation.
+    assert env["data"]["local_only_dropped"] == 2
+    # Index-only pre-filter: zero network beyond the index.
+    assert fetches["count"] == 0
+
+
+def test_ls_runnable_implies_local_only_prefilter(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)  # object_info unavailable → index-only API tier
+    fetches = _count_workflow_fetches(monkeypatch)
+    _count_folder_listings(monkeypatch, {})
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert [r["name"] for r in env["data"]["rows"]] == ["image_z_image"]
+    # Only the non-API survivor's workflow was fetched (API rows never reach the check).
+    assert fetches["names"] == ["image_z_image"]
+    row = env["data"]["rows"][0]
+    assert row["verdict"] == "runnable"  # zero models, no loader node → runnable
+    assert row["missing_count"] == 0
+    assert env["data"]["runnable"] is True
+
+
+def test_ls_runnable_cache_hit_skips_fetch(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    # Pre-seed the phase-1 per-template cache for the surviving template.
+    cache_path = templates_cmd._template_workflow_cache_path("image_z_image")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(json.dumps({"nodes": []}).encode())
+    fetches = _count_workflow_fetches(monkeypatch)
+    _count_folder_listings(monkeypatch, {})
+
+    result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--runnable"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert [r["name"] for r in env["data"]["rows"]] == ["image_z_image"]
+    assert env["data"]["rows"][0]["verdict"] == "runnable"
+    # Cache hit → no network fetch at all.
+    assert fetches["count"] == 0
+
+
+def test_ls_runnable_single_fetch_failure_degrades_to_unknown(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch, fail_names={"image_z_image"})
+    _count_folder_listings(monkeypatch, {})
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    # A single template's fetch failure must NOT abort the listing.
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    row = env["data"]["rows"][0]
+    assert row["name"] == "image_z_image"
+    assert row["verdict"] == "unknown"
+    assert row["missing_count"] == 0
+    assert any("image_z_image" in w for w in env["data"]["warnings"])
+
+
+def test_ls_runnable_lists_each_directory_once(tmp_path, monkeypatch):
+    # Two surviving templates that BOTH reference the `checkpoints` folder: it must
+    # be listed exactly once for the whole run, not once per template.
+    fixture = [
+        {
+            "moduleName": "default",
+            "category": "GEN",
+            "title": "Image",
+            "type": "image",
+            "templates": [
+                {"name": "local_a", "title": "A", "tags": ["Local"], "models": []},
+                {"name": "local_b", "title": "B", "tags": ["Local"], "models": []},
+            ],
+        }
+    ]
+    gf = tmp_path / "idx.json"
+    gf.write_text(json.dumps(fixture))
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    wf = json.dumps(_TOP_LEVEL_WF).encode()  # references checkpoints/v1-5-pruned-emaonly
+    _count_workflow_fetches(monkeypatch, body_by_name={"local_a": wf, "local_b": wf})
+    listings = _count_folder_listings(monkeypatch, {"checkpoints": ["v1-5-pruned-emaonly.safetensors"]})
+
+    result = _run_ls(str(gf), tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 0, result.output
+    # checkpoints listed exactly ONCE despite two templates needing it.
+    assert listings["folders"] == ["checkpoints"]
+    env = _envelope(result.output)
+    verdicts = {r["name"]: r["verdict"] for r in env["data"]["rows"]}
+    assert verdicts == {"local_a": "runnable", "local_b": "runnable"}
+
+
+def test_ls_limit_applied_after_prefilter_not_before(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    fetches = _count_workflow_fetches(monkeypatch)
+    # image_flux2 (API) is FIRST in the fixture. A naive pre-filter `rows[:1]` would
+    # grab it and the pre-filter would then drop it → zero rows. Correct ordering
+    # filters first, so the single local template survives the limit.
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--local-only", "--limit", "1"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert [r["name"] for r in env["data"]["rows"]] == ["image_z_image"]
+    assert fetches["count"] == 0
+
+
+def test_ls_runnable_server_unreachable_is_fatal_when_models_required(gallery_file, tmp_path, monkeypatch):
+    import urllib.error
+
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch, body_by_name={"image_z_image": json.dumps(_TOP_LEVEL_WF).encode()})
+    # Folder listing raises (server down) — fatal, because --runnable means
+    # "runnable on THIS install" and the install can't be inspected.
+    _stub_folder_listing(monkeypatch, urllib.error.URLError("connection refused"))
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "server_not_running"
+
+
+def test_check_template_helper_is_pure_over_shared_listings():
+    # _check_template intersects against a caller-provided listings map with no
+    # network of its own — the batching contract ls --runnable relies on.
+    row = {"name": "image_z_image", "title": "Z", "tags": ["Local"], "requires_custom_nodes": []}
+    listings = {"checkpoints": ["v1-5-pruned-emaonly.safetensors"]}
+    res = templates_cmd._check_template(row, _TOP_LEVEL_WF, listings)
+    assert res["verdict"] == "runnable"
+    assert res["models"]["present"] == ["v1-5-pruned-emaonly.safetensors"]
+
+    # A 404/absent folder (None in the map) → missing, with a warning, no raise.
+    res_missing = templates_cmd._check_template(row, _TOP_LEVEL_WF, {"checkpoints": None})
+    assert res_missing["verdict"] == "missing-models"
+    assert res_missing["models"]["missing"][0]["name"] == "v1-5-pruned-emaonly.safetensors"
+    assert any("checkpoints" in w for w in res_missing["warnings"])
+
+
+def test_ls_local_only_dropped_distinguishes_prefilter_from_limit(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _count_workflow_fetches(monkeypatch)
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--local-only", "--limit", "0"])
+    assert result.exit_code == 0, result.output
+    data = _envelope(result.output)["data"]
+    assert (data["matched"], data["local_only_dropped"], data["shown"]) == (3, 2, 0)
+
+
+def test_ls_without_new_flags_omits_local_only_dropped(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, [])
+    assert result.exit_code == 0, result.output
+    assert "local_only_dropped" not in _envelope(result.output)["data"]
+
+
+def test_ls_runnable_deeply_nested_cached_workflow_does_not_abort(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    cache_path = templates_cmd._template_workflow_cache_path("image_z_image")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    depth = 100_000
+    cache_path.write_bytes(b'{"a":' + b"[" * depth + b"]" * depth + b"}")
+    # Re-fetch also returns over-deep JSON, so the row must degrade to `unknown`.
+    deep = b'{"a":' + b"[" * depth + b"]" * depth + b"}"
+    fetches = _count_workflow_fetches(monkeypatch, body_by_name={"image_z_image": deep})
+    _count_folder_listings(monkeypatch, {})
+
+    result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--runnable"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    # The RecursionError cache entry is a miss (re-fetched), never a listing abort.
+    assert fetches["names"] == ["image_z_image"]
+    assert env["data"]["rows"][0]["verdict"] == "unknown"
+    assert any("image_z_image" in w for w in env["data"]["warnings"])
+
+
+def test_ls_runnable_oversized_folder_listing_is_structured_error(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch, body_by_name={"image_z_image": json.dumps(_TOP_LEVEL_WF).encode()})
+    _stub_folder_listing(monkeypatch, ResponseTooLarge("too big"))
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 1
+    assert _envelope(result.output)["error"]["code"] == "model_listing_too_large"
+
+
+@pytest.mark.parametrize(
+    "directory, listed, valid",
+    [("model..v2", True, True), (".", False, False), ("..", False, False), ("a/b", False, False)],
+)
+def test_batch_folder_checks_use_shared_validator(monkeypatch, directory, listed, valid):
+    calls = _count_folder_listings(monkeypatch, {directory: ["m.safetensors"]})
+    listings = templates_cmd._list_model_folders(None, [directory])
+    assert (directory in listings) is listed
+    assert calls["folders"] == ([directory] if listed else [])
+
+    row = {"name": "x", "title": "X", "tags": ["Local"], "requires_custom_nodes": []}
+    wf = {"nodes": [], "models": [{"name": "m.safetensors", "directory": directory}]}
+    monkeypatch.setattr(
+        templates_cmd, "_collect_model_requirements", lambda _wf: [{"name": "m.safetensors", "directory": directory}]
+    )
+    res = templates_cmd._check_template(row, wf, listings)
+    assert (res["models"]["present"] == ["m.safetensors"]) is valid
+    assert any("isn't a valid model folder" in w for w in res["warnings"]) is (not valid)
+
+
+def test_ls_runnable_unparseable_cache_entry_is_refetched(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    cache_path = templates_cmd._template_workflow_cache_path("image_z_image")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(b"{truncated")
+    fetches = _count_workflow_fetches(monkeypatch)
+    _count_folder_listings(monkeypatch, {})
+
+    result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--runnable"])
+    assert result.exit_code == 0, result.output
+    assert fetches["names"] == ["image_z_image"]
+    assert _envelope(result.output)["data"]["rows"][0]["verdict"] == "runnable"
+    assert json.loads(cache_path.read_bytes()) == {"nodes": []}
+
+
+def test_ls_runnable_unparseable_fetched_body_is_not_cached(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch, body_by_name={"image_z_image": b"<html>oops</html>"})
+    _count_folder_listings(monkeypatch, {})
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 0, result.output
+    assert _envelope(result.output)["data"]["rows"][0]["verdict"] == "unknown"
+    assert not templates_cmd._template_workflow_cache_path("image_z_image").exists()
+
+
+@pytest.mark.parametrize("body", [b"{}", b'{"error": "rate limited"}', b'{"nodes": [], "n": ' + b"9" * 5000 + b"}"])
+def test_ls_runnable_non_workflow_body_is_unknown_not_runnable(gallery_file, tmp_path, monkeypatch, body):
+    # An error payload / nodes-less object must not check as a zero-node `runnable`,
+    # and an over-long int literal (a plain ValueError) must not escape as a traceback.
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch, body_by_name={"image_z_image": body})
+    _count_folder_listings(monkeypatch, {})
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 0, result.output
+    assert _envelope(result.output)["data"]["rows"][0]["verdict"] == "unknown"
+    assert not templates_cmd._template_workflow_cache_path("image_z_image").exists()
+
+
+def test_ls_runnable_warns_when_object_info_unavailable(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch)
+    _count_folder_listings(monkeypatch, {})
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 0, result.output
+    data = _envelope(result.output)["data"]
+    assert any("object_info unavailable" in w for w in data["warnings"])
+    assert data["rows"][0]["verdict"] == "runnable"
+
+
+def test_ls_runnable_folder_http_error_degrades_that_folder_and_dedupes_warning(tmp_path, monkeypatch):
+    import urllib.error
+
+    fixture = [
+        {
+            "moduleName": "default",
+            "category": "GEN",
+            "title": "Image",
+            "type": "image",
+            "templates": [
+                {"name": "local_a", "title": "A", "tags": ["Local"], "models": []},
+                {"name": "local_b", "title": "B", "tags": ["Local"], "models": []},
+            ],
+        }
+    ]
+    gf = tmp_path / "idx.json"
+    gf.write_text(json.dumps(fixture))
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    wf = json.dumps(_TOP_LEVEL_WF).encode()
+    _count_workflow_fetches(monkeypatch, body_by_name={"local_a": wf, "local_b": wf})
+    _stub_folder_listing(monkeypatch, urllib.error.HTTPError("http://x", 500, "boom", {}, None))
+
+    result = _run_ls(str(gf), tmp_path, monkeypatch, ["--runnable"])
+    # A non-404 HTTP error means the server answered: one folder degrades, the run continues.
+    assert result.exit_code == 0, result.output
+    data = _envelope(result.output)["data"]
+    assert {r["name"]: r["verdict"] for r in data["rows"]} == {"local_a": "missing-models", "local_b": "missing-models"}
+    assert sum("HTTP 500" in w for w in data["warnings"]) == 1
+    # Both templates share the folder; its per-template warning is reported once.
+    assert sum("not found on the local server" in w for w in data["warnings"]) == 1
+
+
+def test_ls_runnable_pretty_table_escapes_gallery_markup(tmp_path, monkeypatch):
+    fixture = [
+        {
+            "moduleName": "default",
+            "category": "GEN",
+            "title": "Image",
+            "type": "image",
+            "templates": [{"name": "local_a", "title": "Bad [/bold] title", "tags": ["Local"], "models": []}],
+        }
+    ]
+    gf = tmp_path / "idx.json"
+    gf.write_text(json.dumps(fixture))
+    reset_renderer_for_testing()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch)
+    _count_folder_listings(monkeypatch, {})
+
+    result = _run_ls(str(gf), tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 0, result.output
+    assert "Bad [/bold] title" in result.output

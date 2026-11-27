@@ -599,7 +599,7 @@ def test_builder_client_endpoints_and_parsing(monkeypatch):
 
     c = BuilderClient("https://builder.test/", "jwt-token")
     assert c.create_blob("model", "f.safetensors", "hash", 5) == ("b1", "https://put")
-    assert c.create_build("n", {"models": [], "customNodes": []}) == "d1"
+    assert c.create_build_response("n", {"models": [], "customNodes": []})["id"] == "d1"
     assert c.create_release("d1", [{"os": "linux", "gpu": "nvidia"}]) == ("v1", "https://s")
     results = c.resolve_models(["a.safetensors"])
     assert results[0]["candidates"][0]["sourceUri"] == "https://u"
@@ -1005,6 +1005,20 @@ def _write_pack(root, name, *, project=None, git=False):
     return d
 
 
+def test_scan_still_reads_a_local_node_over_the_push_size_limit(tmp_path, monkeypatch):
+    # Given
+    node_dir = _write_pack(tmp_path, "pack")
+    node_dir.joinpath("nodes.py").write_bytes(b"NODE")
+    monkeypatch.setattr(build, "_BUILDER_NODE_SIZE_LIMIT_BYTES", 1)
+
+    # When
+    (node,) = build.scan_custom_nodes(node_dir.parent)
+
+    # Then
+    assert node["source"] == "local"
+    assert node["localSizeBytes"] > 1
+
+
 def test_scan_drops_the_git_keys_when_it_records_a_registry_pin(tmp_path, monkeypatch):
     """Exactly one source per node, which the builder enforces. A half-git checkout
     (an origin but no resolvable HEAD) would otherwise carry both, which `create`
@@ -1193,12 +1207,19 @@ def test_snapshot_from_definition_carries_no_models():
 
 
 def test_report_advisories_names_every_thing_the_import_could_not_carry():
-    lines = build.report_advisories(
-        {"notInRegistry": ["was-node-suite-comfyui"], "unpinnablePins": ["torch"], "pythonSatisfied": True}
-    )
-    assert any("was-node-suite-comfyui" in line and "does not publish" in line for line in lines)
-    assert any("torch" in line and "not a public PyPI release" in line for line in lines)
-    assert len(lines) == 2  # pythonSatisfied True says nothing
+    report = {"notInRegistry": ["was-node-suite-comfyui"], "unpinnablePins": ["torch"], "pythonSatisfied": True}
+    (pack,) = build._pack_lines(report)[0]
+    assert "was-node-suite-comfyui" in pack and "does not publish" in pack
+    (line,) = build.report_advisories(report)  # pythonSatisfied True says nothing
+    assert "torch" in line and "not a public PyPI release" in line
+
+
+def test_report_advisories_leaves_every_pack_line_to_pack_lines():
+    """Each pack key renders in `_pack_lines` alone, whatever order the tables
+    hold, so no pack is named twice."""
+    report = {key: [f"{key}-pack"] for key, _ in build._PACK_ADVISORIES}
+    assert build.report_advisories(report) == []
+    assert len(build._pack_lines(report)[0]) == len(build._PACK_ADVISORIES)
 
 
 def test_report_advisories_says_when_no_base_image_matches_the_python():
@@ -1265,7 +1286,7 @@ def test_report_advisories_reads_the_refused_release_as_one_value():
 
 
 def test_report_advisories_names_a_folder_collision():
-    (line,) = build.report_advisories({"collidingNodes": ["ComfyUI-Easy-Use"]})
+    (line,), _ = build._pack_lines({"collidingNodes": ["ComfyUI-Easy-Use"]})
     assert "already claimed the folder" in line and "ComfyUI-Easy-Use" in line
 
 
@@ -1412,6 +1433,6 @@ def test_report_advisories_scrubs_the_newlines_a_crafted_workflow_could_carry():
 
 def test_report_advisories_leaves_a_snapshot_report_unchanged():
     """`comfy build from-snapshot` shares the renderer, so its output must not move."""
-    assert build.report_advisories({"notInRegistry": ["was-node-suite-comfyui"]}) == [
+    assert build._pack_lines({"notInRegistry": ["was-node-suite-comfyui"]})[0] == [
         "1 pinned to something the Comfy Registry does not publish: was-node-suite-comfyui"
     ]

@@ -1,8 +1,11 @@
 """Help JSON coverage: every visible Typer command appears."""
 
 import json
+from pathlib import Path
+from typing import Annotated
 
 import pytest
+import typer
 
 from comfy_cli.cmdline import app
 from comfy_cli.help_json import build_help_json, iter_command_paths
@@ -63,3 +66,125 @@ def test_visible_command_has_help_text(cmd_path):
     doc = build_help_json(app)
     cmd = doc["commands"][cmd_path]
     assert cmd["help"], f"`comfy {cmd_path}` should have a help string"
+
+
+def _find_param(doc, command_path, param_name):
+    """Look up a single param dict by space-separated command path + name."""
+    node = {"subcommands": doc["commands"], "params": doc["root"]["params"]}
+    for part in command_path.split():
+        node = node["subcommands"][part]
+    for p in node["params"]:
+        if p["name"] == param_name:
+            return p
+    raise AssertionError(f"no param {param_name!r} on {command_path!r}")
+
+
+# (command path, param name, expected ``type``). These pin the help JSON ``type``
+# contract across typer versions: typer >= 0.29 dropped ``param.type`` and we now
+# rebuild the value from ``type_descriptor``, so a drift in that mapping must fail
+# here rather than silently change the contract agents consume. The newest-typer
+# CI lane runs this against an unpinned typer so the next break surfaces early.
+@pytest.mark.parametrize(
+    ("command_path", "param_name", "expected_type"),
+    [
+        ("", "workspace", "str"),  # root option, plain string
+        ("", "recent", "boolean"),  # root flag
+        ("jobs ls", "limit", "int"),  # plain int
+        ("stop", "port", "int range"),  # bounded int
+        ("jobs wait", "poll_interval", "float"),  # plain float
+        ("deploy run", "timeout", "float range"),  # bounded float
+        ("preview", "file", "path"),  # pathlib.Path
+        ("deploy run", "asset_root", "path"),  # list[Path] -> element type
+        ("run", "output_node_ids", "str"),  # list[str] -> element type
+        ("install", "cuda_version", "choice"),  # enum choice
+    ],
+)
+def test_param_type_contract(command_path, param_name, expected_type):
+    doc = build_help_json(app)
+    param = _find_param(doc, command_path, param_name)
+    assert param["type"] == expected_type
+
+
+# Shapes no comfy command declares today, but which the ``type_descriptor`` path
+# must still name exactly as ``click.ParamType`` did: tuples are composite
+# (``click.Tuple``), and ``min``/``max`` bound each element of a list or tuple.
+_shape_app = typer.Typer()
+
+
+@_shape_app.command()
+def _shapes(
+    pair: Annotated[tuple[str, int], typer.Option()] = ("a", 1),
+    bounded_pair: Annotated[tuple[int, float], typer.Option(min=0)] = (1, 1.0),
+    bounded_ints: Annotated[list[int] | None, typer.Option(min=1)] = None,
+    ints: Annotated[list[int] | None, typer.Option()] = None,
+    bounded_floats: Annotated[list[float] | None, typer.Option(max=2.0)] = None,
+    text_file: Annotated[typer.FileText | None, typer.Option()] = None,
+    binary_files: Annotated[list[typer.FileBinaryRead] | None, typer.Option()] = None,
+    file_and_int: Annotated[tuple[typer.FileText, int] | None, typer.Option()] = None,
+    resolved_text_file: Annotated[typer.FileText | None, typer.Option(resolve_path=True)] = None,
+    dash_text_file: Annotated[typer.FileText | None, typer.Option(allow_dash=True, dir_okay=False)] = None,
+    resolved_file_and_int: Annotated[tuple[typer.FileText, int] | None, typer.Option(resolve_path=True)] = None,
+    resolved_str: Annotated[str | None, typer.Option(resolve_path=True)] = None,
+    file_only: Annotated[Path | None, typer.Option(dir_okay=False)] = None,
+    dir_only: Annotated[Path | None, typer.Option(file_okay=False)] = None,
+    dir_list: Annotated[list[Path] | None, typer.Option(file_okay=False)] = None,
+) -> None:
+    pass
+
+
+@_shape_app.command()
+def _other() -> None:
+    pass
+
+
+@pytest.mark.parametrize(
+    ("param_name", "expected_type"),
+    [
+        ("pair", "<str int>"),
+        ("bounded_pair", "<int range float range>"),
+        ("bounded_ints", "int range"),
+        ("ints", "int"),
+        ("bounded_floats", "float range"),
+        # typer's file markers are a ``click.File`` (``"filename"``), per element.
+        ("text_file", "filename"),
+        ("binary_files", "filename"),
+        ("file_and_int", "<filename int>"),
+        # ...unless path metadata routed them to ``click.Path`` first; that
+        # metadata never re-typed a primitive like ``str``.
+        ("resolved_text_file", "path"),
+        ("dash_text_file", "file"),
+        ("resolved_file_and_int", "<path int>"),
+        ("resolved_str", "str"),
+        # ``click.Path`` names itself from ``file_okay`` / ``dir_okay``.
+        ("file_only", "file"),
+        ("dir_only", "directory"),
+        ("dir_list", "directory"),
+    ],
+)
+def test_composite_and_bounded_element_types(param_name, expected_type):
+    doc = build_help_json(_shape_app)
+    (cmd,) = [c for name, c in doc["commands"].items() if "shapes" in name]
+    (param,) = [p for p in cmd["params"] if p["name"] == param_name]
+    assert param["type"] == expected_type
+
+
+def test_choice_param_emits_string_choices():
+    doc = build_help_json(app)
+    cuda = _find_param(doc, "install", "cuda_version")
+    assert cuda["choices"], "enum option should list its choices"
+    assert all(isinstance(c, str) for c in cuda["choices"]), cuda["choices"]
+    # Enum *values* (not member reprs) are the contract agents consume.
+    assert "12.8" in cuda["choices"]
+
+
+def test_every_param_type_is_a_nonempty_string():
+    """`schemas/help.json` requires every param to carry a string ``type``."""
+    doc = build_help_json(app)
+
+    def walk(node):
+        for p in node.get("params", []):
+            assert isinstance(p.get("type"), str) and p["type"], p
+        for sub in node.get("subcommands", {}).values():
+            walk(sub)
+
+    walk({"params": doc["root"]["params"], "subcommands": doc["commands"]})

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import http.client
 import io
 import json
+import os
+import sys
+import threading
 import urllib.error
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -11,6 +17,7 @@ import typer
 from build_push_support import envelope, make_workspace, write_spec
 from typer.testing import CliRunner
 
+from comfy_cli import error_codes
 from comfy_cli.caller import Caller
 from comfy_cli.cmdline import app as cli_app
 from comfy_cli.command import build
@@ -38,7 +45,17 @@ class ReleaseBuilder:
     def __init__(self) -> None:
         self.calls: list[dict] = []
         self.releases: list[JsonObject] = []
-        self.statuses: list[JsonObject] = []
+        self.statuses: list[JsonObject | Exception] = []
+        self.log_failures: list[Exception] = []
+        #: ``None`` is a body cut short inside its Content-Length, which the
+        #: HTTP layer parses as ``{}`` rather than raising.
+        self.logs: list[str | None] = []
+        #: The Build as the builder holds it; its definition is what a cut releases.
+        self.build: JsonObject = {"id": "build-1", "definition": {}}
+
+    def get_build(self, build_id: str) -> JsonObject:
+        self.calls.append({"method": "get_build", "id": build_id})
+        return self.build
 
     def list_build_targets(self) -> list[JsonObject]:
         self.calls.append({"method": "list_build_targets"})
@@ -56,11 +73,19 @@ class ReleaseBuilder:
 
     def get_release(self, release_id: str) -> JsonObject:
         self.calls.append({"method": "get_release", "id": release_id})
-        return self.statuses.pop(0)
+        status = self.statuses.pop(0)
+        if isinstance(status, Exception):
+            raise status
+        return status
 
     def get_release_logs(self, release_id: str, *, os: str, gpu: str) -> JsonObject:
         self.calls.append({"method": "get_release_logs", "id": release_id, "os": os, "gpu": gpu})
-        return {"versionId": release_id, "os": os, "gpu": gpu, "log": "built", "truncated": False}
+        if self.log_failures:
+            raise self.log_failures.pop(0)
+        log = self.logs.pop(0) if self.logs else "built"
+        if log is None:
+            return {}
+        return {"versionId": release_id, "os": os, "gpu": gpu, "log": log, "truncated": False}
 
     def get_release_manifest(self, release_id: str) -> JsonObject:
         self.calls.append({"method": "get_release_manifest", "id": release_id})
@@ -77,7 +102,14 @@ def stable_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = make_workspace(tmp_path / "install")
-    write_spec(root, build_id="build-1", revision="revision-1", models=[], nodes=[])
+    write_spec(
+        root,
+        build_id="build-1",
+        revision="revision-1",
+        models=[],
+        nodes=[],
+        definition_extra={"baseComfyVersion": "v0.3.40"},
+    )
     monkeypatch.chdir(root)
     return root
 
@@ -307,7 +339,8 @@ def test_logs_short_follow_flag_polls_until_complete(client: ReleaseBuilder, mon
 
     # Then
     assert result.exit_code == 0, result.stderr
-    assert len([call for call in client.calls if call["method"] == "get_release_logs"]) == 2
+    # One read per status poll, and one more after the release completed.
+    assert len([call for call in client.calls if call["method"] == "get_release_logs"]) == 3
     assert len([call for call in client.calls if call["method"] == "get_release"]) == 2
 
 
@@ -333,6 +366,432 @@ def test_create_watch_polls_to_complete_and_reflects_target_failure(
     # Then
     assert result.exit_code == expected_exit, result.stderr
     assert len([call for call in client.calls if call["method"] == "get_release"]) == 3
+
+
+def _calls(client: ReleaseBuilder, method: str) -> int:
+    return len([call for call in client.calls if call["method"] == method])
+
+
+@pytest.fixture
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    recorded: list[float] = []
+    monkeypatch.setattr(build.time, "sleep", recorded.append)
+    return recorded
+
+
+def test_create_watch_rides_out_timed_out_polls(workspace: Path, client: ReleaseBuilder, sleeps: list[float]) -> None:
+    """One poll that timed out must not end a watch on a release still building.
+    Four misses in a row, a success, then four more must all ride out, since a
+    success resets the count."""
+    # Given
+    misses = [
+        urllib.error.URLError("timed out"),
+        TimeoutError("timed out"),
+        ConnectionResetError("connection reset by peer"),
+        urllib.error.URLError("timed out"),
+    ]
+    client.statuses = [
+        *misses,
+        {"id": "release-created", "status": "building", "artifactCounts": {"failed": 0}},
+        *misses,
+        {"id": "release-created", "status": "complete", "artifactCounts": {"failed": 0}},
+    ]
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", "--watch")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["data"]["release"]["status"] == "complete"
+    assert _calls(client, "get_release") == 10
+    assert sleeps == [4.0, 8.0, 16.0, 30.0, build._RELEASE_POLL_SECONDS, 4.0, 8.0, 16.0, 30.0]
+    assert "polling again (1/4)" in result.output
+
+
+@pytest.mark.parametrize(
+    "miss, reason",
+    [
+        pytest.param(urllib.error.URLError("timed out"), "timed out", id="urlerror"),
+        pytest.param(TimeoutError("timed out"), "timed out", id="bare-timeout"),
+        pytest.param(http.client.IncompleteRead(b""), "IncompleteRead(0 bytes read)", id="dropped-response"),
+    ],
+)
+def test_create_watch_fails_after_five_transport_misses_in_a_row(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float], miss: Exception, reason: str
+) -> None:
+    # Given
+    client.statuses = [miss] * build._POLL_TRANSPORT_MISSES
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", "--watch")
+
+    # Then
+    assert result.exit_code == 1, result.output
+    error = envelope(result)["error"]
+    assert error["code"] == "build_builder_error"
+    assert error["message"] == f"builder call failed: <urlopen error {reason}>"
+    assert _calls(client, "get_release") == build._POLL_TRANSPORT_MISSES
+    assert sleeps == [4.0, 8.0, 16.0, 30.0]
+
+
+def test_create_watch_rides_out_responses_dropped_mid_body(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float]
+) -> None:
+    """A connection that closes partway through a chunked response is the network
+    dropping, like a reset, so the watch polls again."""
+    # Given
+    client.statuses = [
+        *[http.client.IncompleteRead(b"")] * (build._POLL_TRANSPORT_MISSES - 1),
+        {"id": "release-created", "status": "complete", "artifactCounts": {"failed": 0}},
+    ]
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", "--watch")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["data"]["release"]["status"] == "complete"
+    assert _calls(client, "get_release") == build._POLL_TRANSPORT_MISSES
+    assert sleeps == [4.0, 8.0, 16.0, 30.0]
+
+
+def test_create_watch_ends_on_the_first_builder_answer(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float]
+) -> None:
+    """A status code is the builder answering, not the network dropping, so it is
+    not retried."""
+    # Given
+    client.statuses = [
+        refusal(500, {"error": "INTERNAL", "message": "boom"}, "https://builder.test/v1/releases/release-created"),
+        {"id": "release-created", "status": "complete", "artifactCounts": {"failed": 0}},
+    ]
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", "--watch")
+
+    # Then
+    assert result.exit_code == 1, result.output
+    assert envelope(result)["error"]["details"]["status"] == 500
+    assert _calls(client, "get_release") == 1
+    assert sleeps == []
+
+
+def test_create_watch_rides_out_a_status_answer_cut_short(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float]
+) -> None:
+    """A status body cut short inside its Content-Length parses as ``{}`` rather
+    than raising. It says nothing about the release, so the watch polls again."""
+    # Given
+    client.statuses = [
+        {},
+        {"id": "release-created", "status": "building", "artifactCounts": {"failed": 0}},
+        {"id": "release-created", "status": "complete", "artifactCounts": {"failed": 0}},
+    ]
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", "--watch")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["data"]["release"]["status"] == "complete"
+    assert _calls(client, "get_release") == 3
+    assert sleeps == [4.0, build._RELEASE_POLL_SECONDS]
+    assert "polling again (1/4)" in result.output
+
+
+class _CutShortStatus(BaseHTTPRequestHandler):
+    """Answers each GET with the next queued body. A ``(declared, sent)`` pair
+    declares ``declared`` bytes in Content-Length, sends only ``sent``, and
+    closes the connection."""
+
+    bodies: list[bytes | tuple[bytes, bytes]] = []
+
+    def do_GET(self) -> None:
+        body = self.bodies.pop(0)
+        declared, sent = body if isinstance(body, tuple) else (body, body)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(declared)))
+        self.end_headers()
+        self.wfile.write(sent)
+        self.close_connection = True
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+def test_create_watch_rides_out_a_status_response_cut_short_on_the_wire(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real HTTP layer reading a fixed-length response that stops early: the
+    standard library returns the partial bytes without raising."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    complete = json.dumps({"id": "release-created", "status": "complete", "artifactCounts": {"failed": 0}}).encode()
+    monkeypatch.setattr(_CutShortStatus, "bodies", [(complete, complete[:20]), complete])
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _CutShortStatus)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    real = BuilderClient(f"http://127.0.0.1:{server.server_address[1]}", "jwt-token")
+    monkeypatch.setattr(client, "get_release", real.get_release)
+
+    # When
+    try:
+        result = invoke_release("create", "--target", "linux/nvidia", "--watch")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["data"]["release"]["status"] == "complete"
+    assert _CutShortStatus.bodies == []
+    assert sleeps == [4.0]
+    assert "polling again (1/4)" in result.output
+
+
+@pytest.mark.parametrize(
+    "verb",
+    [
+        pytest.param(("create", "--target", "linux/nvidia", "--watch"), id="create-watch"),
+        pytest.param(("logs", "release-1", "--target", "linux/nvidia", "--follow"), id="logs-follow"),
+    ],
+)
+def test_a_watch_fails_after_five_unreadable_polls_in_a_row(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float], verb: tuple[str, ...]
+) -> None:
+    """An unreadable answer and a dropped request share one count, so a builder
+    that never answers whole still ends the watch after about a minute."""
+    # Given
+    client.statuses = [{}, TimeoutError("timed out"), {}, [], {"id": "release-1", "status": None}]
+
+    # When
+    result = invoke_release(*verb)
+
+    # Then
+    assert result.exit_code == 1, result.output
+    error = envelope(result)["error"]
+    assert error["code"] == "build_builder_error"
+    assert error["message"] == "the builder sent no readable answer in 5 polls in a row."
+    assert _calls(client, "get_release") == build._POLL_TRANSPORT_MISSES
+    assert sleeps[-4:] == [4.0, 8.0, 16.0, 30.0]
+
+
+@pytest.mark.parametrize(
+    "verb",
+    [
+        pytest.param(("create", "--target", "linux/nvidia", "--watch"), id="create-watch"),
+        pytest.param(("logs", "release-1", "--target", "linux/nvidia", "--follow"), id="logs-follow"),
+    ],
+)
+def test_a_watch_still_ends_on_the_first_unknown_status(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float], verb: tuple[str, ...]
+) -> None:
+    """A whole answer naming a status this CLI does not know is the builder
+    speaking, not the network dropping, so it is not retried."""
+    # Given
+    client.statuses = [{"id": "release-1", "status": "exploded"}]
+
+    # When
+    result = invoke_release(*verb)
+
+    # Then
+    assert result.exit_code == 1, result.output
+    assert envelope(result)["error"]["message"] == "the builder returned unknown release status 'exploded'."
+    assert _calls(client, "get_release") == 1
+    assert sleeps == []
+
+
+def test_logs_follow_rides_out_timed_out_polls(client: ReleaseBuilder, sleeps: list[float]) -> None:
+    # Given
+    client.log_failures = [urllib.error.URLError("timed out")]
+    client.statuses = [
+        TimeoutError("timed out"),
+        {"id": "release-1", "status": "building", "artifactCounts": {"failed": 0}},
+        {"id": "release-1", "status": "complete", "artifactCounts": {"failed": 0}},
+    ]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia", "--follow")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert _calls(client, "get_release_logs") == 4
+    assert _calls(client, "get_release") == 3
+    assert sleeps == [4.0, 4.0, build._RELEASE_POLL_SECONDS]
+
+
+@pytest.mark.parametrize("agentic", [True, False], ids=["json", "pretty"])
+def test_logs_follow_returns_the_log_read_after_the_release_completed(
+    client: ReleaseBuilder, sleeps: list[float], agentic: bool
+) -> None:
+    """The release can finish between the log read and the status read, most
+    plainly while a timed-out status read is retried. The result must carry the
+    log read after completion, or a failed target loses its last lines."""
+    # Given
+    client.logs = ["started\n", "started\nFAILED: missing dependency\n"]
+    client.statuses = [
+        TimeoutError("timed out"),
+        {"id": "release-1", "status": "complete", "artifactCounts": {"failed": 1}},
+    ]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia", "--follow", agentic=agentic)
+
+    # Then
+    assert result.exit_code == 0, result.output
+    if agentic:
+        assert envelope(result)["data"]["log"] == "started\nFAILED: missing dependency\n"
+    else:
+        assert "FAILED: missing dependency" in result.output
+
+
+@pytest.mark.parametrize("agentic", [True, False], ids=["json", "pretty"])
+def test_logs_follow_keeps_the_captured_log_when_the_final_read_comes_back_empty(
+    client: ReleaseBuilder, sleeps: list[float], agentic: bool
+) -> None:
+    """A final read cut short parses as ``{}``. Publishing it would drop the log
+    already read and fail the command's own schema, so the last whole log stands
+    and the user is told it may lack the final lines."""
+    # Given
+    import jsonschema
+
+    client.logs = ["started\nFAILED: missing dependency\n", None]
+    client.statuses = [{"id": "release-1", "status": "complete", "artifactCounts": {"failed": 1}}]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia", "--follow", agentic=agentic)
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert _calls(client, "get_release_logs") == 2
+    if agentic:
+        data = envelope(result)["data"]
+        assert data["log"] == "started\nFAILED: missing dependency\n"
+        schemas_dir = Path(__file__).parent.parent.parent.parent / "comfy_cli" / "schemas"
+        schema = json.loads((schemas_dir / "build_release_logs.json").read_text(encoding="utf-8"))
+        jsonschema.Draft202012Validator(schema).validate(data)
+    else:
+        assert "FAILED: missing dependency" in result.output
+    assert "the final log read came back incomplete" in " ".join(result.output.split())
+
+
+def test_logs_follow_rides_out_a_status_answer_cut_short(client: ReleaseBuilder, sleeps: list[float]) -> None:
+    # Given
+    client.logs = ["started\n", "started\nmore\n", "started\nmore\ndone\n"]
+    client.statuses = [
+        {},
+        {"id": "release-1", "status": "building", "artifactCounts": {"failed": 0}},
+        {"id": "release-1", "status": "complete", "artifactCounts": {"failed": 0}},
+    ]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia", "--follow")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["data"]["log"] == "started\nmore\ndone\n"
+    assert _calls(client, "get_release") == 3
+    assert sleeps == [4.0, build._RELEASE_POLL_SECONDS]
+    assert "polling again (1/4)" in result.output
+
+
+def test_logs_follow_rides_out_a_log_read_cut_short_before_any_log_was_read(
+    client: ReleaseBuilder, sleeps: list[float]
+) -> None:
+    """With no log in hand there is nothing to fall back on, so a cut-short log
+    read is polled again like a cut-short status read."""
+    # Given
+    client.logs = [None, "started\n", "started\ndone\n"]
+    client.statuses = [{"id": "release-1", "status": "complete", "artifactCounts": {"failed": 0}}]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia", "--follow")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["data"]["log"] == "started\ndone\n"
+    assert _calls(client, "get_release_logs") == 3
+    assert sleeps == [4.0]
+    assert "polling again (1/4)" in result.output
+
+
+def test_logs_follow_fails_when_no_log_read_comes_back_whole(client: ReleaseBuilder, sleeps: list[float]) -> None:
+    """A follow whose every log read is cut short has no log to publish; exiting 0
+    with only the release id would fail the command's own schema."""
+    # Given
+    client.logs = [None] * build._POLL_TRANSPORT_MISSES
+    client.statuses = [{"id": "release-1", "status": "complete", "artifactCounts": {"failed": 0}}]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia", "--follow")
+
+    # Then
+    assert result.exit_code == 1, result.output
+    error = envelope(result)["error"]
+    assert error["code"] == "build_builder_error"
+    assert error["message"] == "the builder sent no readable answer in 5 polls in a row."
+    assert _calls(client, "get_release_logs") == build._POLL_TRANSPORT_MISSES
+    assert sleeps == [4.0, 8.0, 16.0, 30.0]
+
+
+def test_a_watch_ends_on_the_first_tls_verification_failure(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float]
+) -> None:
+    """A certificate the CA store refuses will be refused again, so the watch ends
+    at once with the same trust hint a single read gives."""
+    # Given
+    import ssl
+
+    def cert_refused() -> urllib.error.URLError:
+        return urllib.error.URLError(
+            ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        )
+
+    client.statuses = [cert_refused()]
+
+    # When
+    watched = invoke_release("create", "--target", "linux/nvidia", "--watch")
+    client.statuses = [cert_refused()]
+    single = invoke_release("show", "release-1")
+
+    # Then
+    assert watched.exit_code == 1, watched.output
+    assert envelope(watched)["error"]["code"] == "tls_verify_failed"
+    assert envelope(watched)["error"] == envelope(single)["error"]
+    assert _calls(client, "get_release") == 2
+    assert sleeps == []
+    assert "polling again" not in watched.output
+
+
+def test_logs_follow_ends_on_the_first_builder_answer(client: ReleaseBuilder, sleeps: list[float]) -> None:
+    # Given
+    client.statuses = [refusal(503, {"error": "UNAVAILABLE"}, "https://builder.test/v1/releases/release-1")]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia", "--follow")
+
+    # Then
+    assert result.exit_code == 1, result.output
+    assert envelope(result)["error"]["details"]["status"] == 503
+    assert _calls(client, "get_release") == 1
+    assert sleeps == []
+
+
+def test_logs_without_follow_still_fails_on_the_first_timeout(client: ReleaseBuilder, sleeps: list[float]) -> None:
+    """Only a watch rides out a dropped request; a one-off read fails fast like
+    every other builder command."""
+    # Given
+    client.log_failures = [urllib.error.URLError("timed out")]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 1, result.output
+    assert envelope(result)["error"]["message"] == "builder call failed: <urlopen error timed out>"
+    assert _calls(client, "get_release_logs") == 1
+    assert sleeps == []
 
 
 def test_same_version_releases_break_the_tie_on_the_instant_not_the_spelling() -> None:
@@ -454,7 +913,7 @@ def test_each_mapped_refusal_reaches_the_agent_under_its_own_code(
 def test_a_mapped_code_under_another_status_keeps_the_generic_envelope(
     workspace: Path, monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
-    """All three refusals are 409 in the builder's contract, so a mapped code
+    """Every mapped refusal is 409 in the builder's contract, so a mapped code
     arriving under any other status came from something that is not the builder
     -- a proxy, a WAF page, a service that changed -- and must not hand an agent
     remediation for a limit that may not exist."""
@@ -844,6 +1303,414 @@ def test_delete_refuses_an_id_that_names_no_release_before_it_reaches_the_builde
     assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, "build_missing_input", [])
 
 
+#: The read verbs that take ``[RELEASE] [PATH]``, each with the options it needs
+#: to reach the builder, and the client call that reads the release.
+READ_VERBS = [
+    pytest.param(("show",), "get_release", id="show"),
+    pytest.param(("logs", "--target", "linux/nvidia"), "get_release_logs", id="logs"),
+    pytest.param(("manifest",), "get_release_manifest", id="manifest"),
+]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_dot_before_the_release_reads_the_newest_release_of_the_build_there(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str
+) -> None:
+    """`release create .`, `release ls .` and `deploy up .` all take the path
+    first, so `release show .` is what a caller types. Read as a release id, `.`
+    reached the builder as `GET /v1/releases/.` and came back an opaque 302."""
+    # Given
+    client.releases = [{"id": "release-1", "version": 1}, {"id": "release-2", "version": 2}]
+    client.statuses = [{"id": "release-2", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], ".", *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [
+        ("list_releases", "build-1"),
+        (read, "release-2"),
+    ]
+
+
+def test_a_build_path_before_the_release_reads_that_build_from_anywhere(
+    workspace: Path, client: ReleaseBuilder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    client.releases = [{"id": "release-7", "version": 7}]
+    client.statuses = [{"id": "release-7", "status": "complete"}]
+
+    # When
+    result = invoke_release("show", str(workspace))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [
+        {"method": "list_releases", "id": "build-1"},
+        {"method": "get_release", "id": "release-7"},
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize(
+    "release_id",
+    [
+        pytest.param("   ", id="blank"),
+        pytest.param(".", id="dot"),
+        pytest.param("..", id="dot-dot"),
+    ],
+)
+def test_a_read_verb_refuses_an_id_that_names_no_release_before_it_reaches_the_builder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str, release_id: str
+) -> None:
+    """With PATH given as well, a dot-only RELEASE cannot be the path, and the
+    read client joins the id into the URL unencoded, so a dot segment aims the
+    read at the collection or its parent. The empty `calls` is the load-bearing
+    half."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+
+    # When
+    result = invoke_release(verb[0], release_id, ".", *verb[1:])
+
+    # Then
+    assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, "build_missing_input", [])
+
+
+def test_a_release_id_that_names_no_path_still_reaches_the_builder(workspace: Path, client: ReleaseBuilder) -> None:
+    # Given
+    client.statuses = [{"id": "release-3", "status": "complete"}]
+
+    # When
+    result = invoke_release("show", "release-3")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [{"method": "get_release", "id": "release-3"}]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize("kind", ["folder", "file"])
+def test_a_release_id_that_matches_a_name_in_the_cwd_still_reaches_the_builder(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str, kind: str
+) -> None:
+    """The builder's failure text tells a caller to run `comfy build release
+    logs <versionId> --target ...` with no PATH. A file or folder that happens
+    to share that name, and holds no build spec, must not turn the id into a
+    path."""
+    # Given
+    if kind == "folder":
+        (workspace / "rel-abc").mkdir()
+    else:
+        (workspace / "rel-abc").write_text("notes")
+    client.statuses = [{"id": "rel-abc", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], "rel-abc", *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [(read, "rel-abc")]
+
+
+def test_a_bare_folder_name_that_holds_a_build_spec_is_the_build_path(workspace: Path, client: ReleaseBuilder) -> None:
+    # Given
+    write_spec(make_workspace(workspace / "other"), build_id="build-2", revision="revision-1", models=[], nodes=[])
+    client.releases = [{"id": "release-9", "version": 9}]
+    client.statuses = [{"id": "release-9", "status": "complete"}]
+
+    # When
+    result = invoke_release("show", "other")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [
+        {"method": "list_releases", "id": "build-2"},
+        {"method": "get_release", "id": "release-9"},
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize(
+    "release_id",
+    [
+        # `stat` fails with "file name too long", which `Path.is_file` lets
+        # through before Python 3.14 (3.14 answers False).
+        pytest.param("r" * 300, id="longer-than-a-file-name"),
+        # No separator, so not path-shaped; `expanduser` raises on the unknown user.
+        pytest.param("~nosuchuser-comfy-test", id="tilde-unknown-user"),
+    ],
+)
+def test_a_release_id_the_disk_probe_cannot_read_still_reaches_the_builder(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str, release_id: str
+) -> None:
+    """Looking for a build spec behind RELEASE must never fail the read: an id
+    the file system cannot even look up is no build path, so it reaches the
+    builder as the id, as it did before RELEASE could be a path."""
+    # Given
+    client.statuses = [{"id": release_id, "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], release_id, *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [(read, release_id)]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod 000 does not deny reads on Windows")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a chmod 000 folder")
+def test_a_release_id_that_names_an_unreadable_folder_still_reaches_the_builder(
+    workspace: Path, client: ReleaseBuilder
+) -> None:
+    """Probing `rel-locked/comfy-build.yaml` inside a folder the caller cannot
+    read raises `PermissionError`; the id still reaches the builder."""
+    # Given
+    locked = workspace / "rel-locked"
+    locked.mkdir()
+    client.statuses = [{"id": "rel-locked", "status": "complete"}]
+    locked.chmod(0)
+    try:
+        # When
+        result = invoke_release("show", "rel-locked")
+    finally:
+        locked.chmod(0o755)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [{"method": "get_release", "id": "rel-locked"}]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod 000 does not deny reads on Windows")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a chmod 000 folder")
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize("release", ["locked/", "./locked/comfy-build.yaml"], ids=["folder", "spec-file"])
+def test_a_path_shaped_release_naming_an_unreadable_folder_fails_as_release_ls_does(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str, release: str
+) -> None:
+    """A path-shaped RELEASE is a path, so a spec the caller cannot read fails
+    the way `release ls` fails on that path. Which code that is depends on the
+    Python: `Path.is_file` raises `PermissionError` there up to 3.13, and 3.14
+    answers False, so both read it as `build_spec_not_found`."""
+    # Given
+    locked = make_workspace(workspace / "locked")
+    write_spec(locked, build_id="build-3", revision="revision-1", models=[], nodes=[])
+    locked.chmod(0)
+    try:
+        # When
+        listed = invoke_release("ls", release)
+        result = invoke_release(verb[0], release, *verb[1:])
+    finally:
+        locked.chmod(0o755)
+
+    # Then
+    assert (result.exit_code, envelope(result)["error"]["code"], client.calls) == (
+        listed.exit_code,
+        envelope(listed)["error"]["code"],
+        [],
+    )
+
+
+def test_a_path_shaped_release_longer_than_a_file_name_fails_as_release_ls_does(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shaped like a path, it is a path, refused before any request with an
+    envelope rather than a traceback, the way `release ls` refuses it. Which
+    code that is depends on the Python: looking up its spec raises "file name
+    too long" up to 3.13, and 3.14's `Path.is_file` answers False, so no spec."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+    release = "./" + "r" * 300
+
+    # When
+    listed = invoke_release("ls", release)
+    result = invoke_release("show", release)
+
+    # Then
+    assert (result.exit_code, envelope(result)["error"]["code"], calls) == (
+        listed.exit_code,
+        envelope(listed)["error"]["code"],
+        [],
+    )
+
+
+def test_a_path_shaped_release_for_an_unknown_user_is_refused_before_it_reaches_the_builder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`expanduser` cannot resolve it, so there is no spec path to report; it is
+    refused with an envelope rather than a traceback."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+
+    # When
+    result = invoke_release("show", "~nosuchuser-comfy-test/build")
+
+    # Then
+    assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, "build_missing_input", [])
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize(
+    "missing",
+    [
+        pytest.param("./typo-dir", id="dot-slash"),
+        pytest.param("../other-build", id="parent"),
+        pytest.param("typo-dir/.", id="trailing-dot"),
+        pytest.param("typo-dir/", id="trailing-slash"),
+        pytest.param("typo.yaml", id="spec-file"),
+    ],
+)
+def test_a_path_shaped_release_that_names_no_spec_is_refused_before_it_reaches_the_builder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str, missing: str
+) -> None:
+    """The read client joins the id into the URL unencoded, so `./typo-dir`
+    resolved to `GET /v1/releases/typo-dir` and `../other-build` climbed out of
+    the collection. A RELEASE shaped like a path is a path, and a path with no
+    spec behind it fails the way every other build verb does."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+
+    # When
+    result = invoke_release(verb[0], missing, *verb[1:])
+
+    # Then
+    error = envelope(result)["error"]
+    assert (result.exit_code, error["code"], calls) == (1, "build_spec_not_found", [])
+    assert Path(error["details"]["path"]).is_absolute()
+
+
+def test_a_path_shaped_release_with_no_spec_is_ignored_when_id_names_the_build(
+    tmp_path: Path, client: ReleaseBuilder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--id` picks the Build and PATH is never read, as with `release ls . --id`."""
+    # Given
+    monkeypatch.chdir(tmp_path)
+    client.releases = [{"id": "release-6", "version": 6}]
+    client.statuses = [{"id": "release-6", "status": "complete"}]
+
+    # When
+    result = invoke_release("show", ".", "--id", "build-9")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [
+        {"method": "list_releases", "id": "build-9"},
+        {"method": "get_release", "id": "release-6"},
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_path_shaped_release_the_disk_probe_cannot_read_is_ignored_when_id_names_the_build(
+    tmp_path: Path, client: ReleaseBuilder, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str
+) -> None:
+    """`--id` picks the Build and PATH is never read, so the "file name too
+    long" from looking up a spec behind RELEASE must not fail the read."""
+    # Given
+    monkeypatch.chdir(tmp_path)
+    client.releases = [{"id": "release-6", "version": 6}]
+    client.statuses = [{"id": "release-6", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], "./" + "r" * 300, *verb[1:], "--id", "build-9")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [
+        ("list_releases", "build-9"),
+        (read, "release-6"),
+    ]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod 000 does not deny reads on Windows")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a chmod 000 folder")
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_path_shaped_release_naming_an_unreadable_folder_is_ignored_when_id_names_the_build(
+    tmp_path: Path, client: ReleaseBuilder, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str
+) -> None:
+    """`--id` picks the Build and PATH is never read, so the `PermissionError`
+    from looking up `locked/comfy-build.yaml` must not fail the read."""
+    # Given
+    monkeypatch.chdir(tmp_path)
+    locked = make_workspace(tmp_path / "locked")
+    write_spec(locked, build_id="build-3", revision="revision-1", models=[], nodes=[])
+    client.releases = [{"id": "release-6", "version": 6}]
+    client.statuses = [{"id": "release-6", "status": "complete"}]
+    locked.chmod(0)
+    try:
+        # When
+        result = invoke_release(verb[0], "locked/", *verb[1:], "--id", "build-9")
+    finally:
+        locked.chmod(0o755)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [
+        ("list_releases", "build-9"),
+        (read, "release-6"),
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_path_shaped_release_with_a_spec_is_the_build_path(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str
+) -> None:
+    # Given
+    client.releases = [{"id": "release-4", "version": 4}]
+    client.statuses = [{"id": "release-4", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], "./comfy-build.yaml", *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [
+        ("list_releases", "build-1"),
+        (read, "release-4"),
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_release_id_followed_by_a_path_reaches_the_builder_as_the_id(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str
+) -> None:
+    # Given
+    client.statuses = [{"id": "release-5", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], "release-5", ".", *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [(read, "release-5")]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize(
+    "release_id",
+    [
+        pytest.param("./typo-dir", id="dot-slash"),
+        pytest.param("rel-abc/logs", id="nested"),
+    ],
+)
+def test_a_path_shaped_release_followed_by_a_path_is_refused_before_it_reaches_the_builder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str, release_id: str
+) -> None:
+    """With PATH given, RELEASE is the id; one with a path separator cannot name
+    a single release, and unencoded it would aim the read at another route."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+
+    # When
+    result = invoke_release(verb[0], release_id, ".", *verb[1:])
+
+    # Then
+    assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, "build_missing_input", [])
+
+
 def test_delete_uses_one_stripped_release_id_for_the_prompt_the_url_and_the_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -866,3 +1733,778 @@ def test_delete_uses_one_stripped_release_id_for_the_prompt_the_url_and_the_payl
         ["https://builder.test/v1/releases/release-9"],
         {"releaseId": "release-9", "deleted": True},
     )
+
+
+#: The four reasons the builder gave for model entries as people paste them.
+REFUSED_MODELS = [
+    {"field": "models[0].type", "reason": "must be a model directory under models/ (e.g. checkpoints)"},
+    {"field": "models[1].filename", "reason": "sourceUri has no file extension; set an explicit filename"},
+    {"field": "models[2].filename", "reason": "must be a safe filename"},
+    {"field": "models[3].sha256", "reason": "must be a 64-character sha256"},
+]
+
+
+def definition_refused(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+    raise refusal(400, {"error": "INVALID_DEFINITION", "invalid": REFUSED_MODELS}, url)
+
+
+def test_a_refused_definition_leads_with_every_reason(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cut's 400 carries its reasons as a list; the envelope names each one
+    rather than the code, and hands them to an agent apart."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", definition_refused)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_definition_invalid"
+    assert error["details"]["invalid"] == REFUSED_MODELS
+    assert error["details"]["buildId"] == "build-1"
+    assert error["message"].startswith("the builder refused the build's definition:\n")
+    for issue in REFUSED_MODELS:
+        assert f"{issue['field']}: {issue['reason']}" in error["message"]
+    assert "INVALID_DEFINITION" not in error["message"]
+    # Re-running the same definition is refused the same way, so the cut's retry
+    # hint would send the reader the wrong way.
+    assert error["hint"] == error_codes.get("build_definition_invalid").hint
+
+
+def test_a_refused_definition_prints_one_reason_per_line(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", definition_refused)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", agentic=False)
+
+    # Then
+    assert result.exit_code == 1
+    # Each reason starts its own line; the panel may wrap a long one after that.
+    lines = [line.strip("│ ") for line in result.output.splitlines()]
+    for issue in REFUSED_MODELS:
+        assert any(line.startswith(f"{issue['field']}: ") for line in lines), result.output
+    assert "idempotent" not in result.output
+    # The message already lists them; the list apart is for JSON.
+    assert any(line.startswith("buildId") for line in lines), result.output
+    assert not any(line.startswith("invalid") for line in lines), result.output
+
+
+def test_a_refused_definition_with_only_a_message_leads_with_the_message(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A save's refusal carries one message and no list; it leads too, without the code."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    reason = "the build's configuration is invalid: baseImage: must be one of: cuda-12.8"
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        raise refusal(400, {"error": "INVALID_DEFINITION", "message": reason}, url)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["message"]) == ("build_definition_invalid", reason)
+    assert "invalid" not in error["details"]
+
+
+def test_a_refused_definition_carries_the_status(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    _refusing_builder(monkeypatch, 400, {"error": "INVALID_DEFINITION", "invalid": REFUSED_MODELS})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["details"]["status"]) == ("build_definition_invalid", 400)
+
+
+def test_a_long_list_of_refused_fields_obeys_the_message_cap(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each reason is a line of the message, so a definition refused for hundreds of
+    fields would otherwise carry every one of them into the envelope."""
+    # Given
+    invalid = [{"field": f"models[{index}].sha256", "reason": "must be a 64-character sha256"} for index in range(400)]
+    _refusing_builder(monkeypatch, 400, {"error": "INVALID_DEFINITION", "invalid": invalid})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["code"] == "build_definition_invalid"
+    assert error["message"].startswith("the builder refused the build's definition:\n")
+    assert len(error["message"].encode("utf-8")) <= build._BUILDER_MESSAGE_CAP
+    assert len(error["details"]["invalid"]) == 400
+
+
+class _ErrorRecorder:
+    """A renderer in one mode that keeps the error it was handed."""
+
+    def __init__(self, pretty: bool) -> None:
+        self.pretty = pretty
+        self.emitted: dict = {}
+
+    def is_pretty(self) -> bool:
+        return self.pretty
+
+    def error(self, **fields) -> None:
+        self.emitted = fields
+
+
+@pytest.mark.parametrize(
+    ("pretty", "where"),
+    [
+        pytest.param(True, "read every one with `--json`", id="pretty"),
+        pytest.param(False, "read every one in `details.invalid`", id="json"),
+    ],
+)
+def test_a_refusal_past_the_cap_ends_on_a_whole_line_and_counts_the_rest(pretty: bool, where: str) -> None:
+    """Cut at the cap, the message stopped mid-reason with nothing to say the rest
+    was dropped, and in pretty mode `details.invalid` is left out, so the rest was
+    nowhere."""
+    # Given
+    reason = "must be a model directory under models/ (e.g. checkpoints, insightface/models/antelopev2)"
+    invalid = [{"field": f"models[{index}].type", "reason": reason} for index in range(80)]
+    models = [{"type": "Loras", "filename": f"lora-{index:03d}.safetensors"} for index in range(80)]
+    body = json.dumps({"error": "INVALID_DEFINITION", "invalid": invalid}).encode()
+    renderer = _ErrorRecorder(pretty)
+
+    # When
+    build._report_builder_error(
+        renderer, refusal(400, body, "https://builder.test/v1/builds"), {"buildId": "build-1"}, None, models
+    )
+
+    # Then
+    error = renderer.emitted
+    assert error["code"] == "build_definition_invalid"
+    assert len(error["message"].encode("utf-8")) <= build._BUILDER_MESSAGE_CAP
+    heading, *shown, last = error["message"].split("\n")
+    assert heading == "the builder refused the build's definition:"
+    assert shown == [f"  models[{index}].type (lora-{index:03d}.safetensors): {reason}" for index in range(len(shown))]
+    assert last == f"  ... and {80 - len(shown)} more; {where}"
+    assert 0 < len(shown) < 80
+    assert ("invalid" in error["details"]) is not pretty
+    if not pretty:
+        assert len(error["details"]["invalid"]) == 80
+
+
+def test_a_refused_definition_under_another_status_keeps_the_builder_error(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the builder's 400 means the definition was refused; the same body under
+    a 500 came from something else and keeps the generic envelope and its body."""
+    # Given
+    _refusing_builder(monkeypatch, 500, {"error": "INVALID_DEFINITION", "invalid": REFUSED_MODELS})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["details"]["status"]) == ("build_builder_error", 500)
+    assert "invalid" not in error["details"]
+    assert "INVALID_DEFINITION" in error["details"]["body"]
+
+
+def test_a_reason_list_in_another_shape_falls_back_to_the_message(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    reason = "the build's configuration is invalid: baseImage: must be one of: cuda-12.8"
+    _refusing_builder(monkeypatch, 400, {"error": "INVALID_DEFINITION", "invalid": 5, "message": reason})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["message"]) == ("build_definition_invalid", reason)
+    assert "invalid" not in error["details"]
+
+
+#: The cut's refusal for a file the definition names that is not in storage, as
+#: releases_cut.go ``verifyReferencedBlobs`` words it.
+BLOB_NOT_UPLOADED = {"field": "blob:blob-7", "reason": "not uploaded"}
+
+
+@pytest.mark.parametrize(
+    ("invalid", "also_the_spec"),
+    [
+        pytest.param([BLOB_NOT_UPLOADED], False, id="only-a-blob"),
+        pytest.param([REFUSED_MODELS[3], BLOB_NOT_UPLOADED], True, id="a-blob-and-a-field"),
+    ],
+)
+def test_a_blob_never_uploaded_says_to_push_it_again(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, invalid: list[dict[str, str]], also_the_spec: bool
+) -> None:
+    """No edit to the spec's rules clears it: the file has to upload, and a push
+    skips an entry that already carries a ``blobId``. An entry with only the
+    ``blobId`` has nothing left to push from once it goes, so the hint names both."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        raise refusal(400, {"error": "INVALID_DEFINITION", "invalid": invalid}, url)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["code"] == "build_definition_invalid"
+    assert "blob:blob-7: not uploaded" in error["message"]
+    assert "delete that `blobId`" in error["hint"]
+    assert "`comfy build push`" in error["hint"]
+    assert "if that entry has no `source: local`" in error["hint"]
+    assert "`localPath`" in error["hint"]
+    assert "`sourceUri`" in error["hint"]
+    assert error["hint"].startswith("fix each named definition field in the spec") is also_the_spec
+
+
+def test_only_well_formed_reasons_are_kept() -> None:
+    body = json.dumps(
+        {
+            "error": "INVALID_DEFINITION",
+            "invalid": [
+                {"field": "models[0].type", "reason": "must be a model directory"},
+                "models[1]: must be an object",
+                {"field": "models[2].sha256"},
+                {"field": 3, "reason": "must be a 64-character sha256"},
+                {"field": "models[4].filename", "reason": None},
+            ],
+        }
+    )
+
+    assert build._builder_invalid(body) == [{"field": "models[0].type", "reason": "must be a model directory"}]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("not json", id="not-json"),
+        pytest.param(json.dumps(["models[0]"]), id="a-list"),
+        pytest.param(json.dumps({"error": "INVALID_DEFINITION", "invalid": "models[0]"}), id="invalid-not-a-list"),
+        pytest.param(json.dumps({"error": "INVALID_DEFINITION"}), id="no-invalid"),
+    ],
+)
+def test_a_body_without_a_reason_list_gives_none(body: str) -> None:
+    assert build._builder_invalid(body) == []
+
+
+def _cut_refuses(monkeypatch: pytest.MonkeyPatch, answer: dict) -> None:
+    """Every builder call answers a 400 with *answer* as its body."""
+    from comfy_cli.builder_api import BuilderClient
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        raise refusal(400, answer, url)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+
+#: The cut's refusals of its ``--target`` values, as releases_cut.go
+#: ``validateTargets`` and ``validateTargetShape`` word them.
+TARGET_REPEATED = {
+    "field": "targets[1]",
+    "reason": "linux/nvidia is already requested by targets[0]; each os/gpu pair builds one artifact",
+}
+TARGET_BAD_GPU = {"field": "targets[0].gpu", "reason": "must be nvidia, amd, cpu, or mps"}
+
+
+@pytest.mark.parametrize("issue", [TARGET_REPEATED, TARGET_BAD_GPU], ids=["repeated", "bad-gpu"])
+def test_a_refused_target_names_the_target_option_not_the_spec(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, issue: dict[str, str]
+) -> None:
+    """The cut checks the ``--target`` values under the same code as the definition;
+    no edit to the spec clears one."""
+    # Given
+    _cut_refuses(monkeypatch, {"error": "INVALID_DEFINITION", "invalid": [issue]})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["code"] == "build_definition_invalid"
+    assert error["message"] == f"the builder refused the release:\n  {issue['field']}: {issue['reason']}"
+    assert "`--target`" in error["hint"]
+    assert "`comfy build refs build-targets`" in error["hint"]
+    assert "spec" not in error["hint"]
+
+
+@pytest.mark.parametrize(
+    ("invalid", "parts"),
+    [
+        pytest.param([REFUSED_MODELS[3], TARGET_REPEATED], ("spec", "targets"), id="a-field-and-a-target"),
+        pytest.param([TARGET_REPEATED, BLOB_NOT_UPLOADED], ("targets", "blob"), id="a-target-and-a-blob"),
+        pytest.param(
+            [BLOB_NOT_UPLOADED, TARGET_REPEATED, REFUSED_MODELS[3]], ("spec", "targets", "blob"), id="all-three"
+        ),
+    ],
+)
+def test_a_refused_release_names_each_fix_that_applies(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, invalid: list[dict[str, str]], parts: tuple[str, ...]
+) -> None:
+    # Given
+    _cut_refuses(monkeypatch, {"error": "INVALID_DEFINITION", "invalid": invalid})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["message"].startswith("the builder refused the release:\n")
+    found = {
+        "spec": "fix each named definition field in the spec" in error["hint"],
+        "targets": "`--target`" in error["hint"],
+        "blob": "delete that `blobId`" in error["hint"],
+    }
+    assert found == {kind: kind in parts for kind in found}
+
+
+def test_the_blob_hint_fits_a_node_as_well_as_a_model(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cut checks a node's zip as well as a model's file, and a node has no
+    ``sourceUri``: the hint names the sources each can take."""
+    # Given
+    issue = {"field": "blob:node-blob-1", "reason": "uploaded content does not match declared sha256"}
+    _cut_refuses(monkeypatch, {"error": "INVALID_DEFINITION", "invalid": [issue]})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    hint = envelope(result)["error"]["hint"]
+    assert "a model's `sourceUri`" in hint
+    assert "a node's `registryVersion` or `repository`" in hint
+    assert "or a `sourceUri`" not in hint
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"error": "INVALID_DEFINITION"}, id="bare"),
+        pytest.param({"error": "INVALID_DEFINITION", "invalid": [], "message": ""}, id="empty"),
+    ],
+)
+def test_a_refused_definition_with_no_reason_is_a_builder_error(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, body: dict
+) -> None:
+    """With nothing to list, there is no refusal to lead with: the generic envelope
+    keeps the code and the body."""
+    # Given
+    _cut_refuses(monkeypatch, body)
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["code"] == "build_builder_error"
+    assert "INVALID_DEFINITION" in error["message"]
+    assert error["details"]["status"] == 400
+
+
+@pytest.mark.parametrize("mode", ["pretty", "json", "ndjson"])
+@pytest.mark.parametrize("failed", [0, 1], ids=["ready-sibling", "failed-sibling"])
+def test_stopped_watch_has_one_terminal_error_after_stopping_on_the_wire(
+    workspace: Path,
+    client: ReleaseBuilder,
+    sleeps: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    failed: int,
+) -> None:
+    # Given: controlled builder responses, read by the real HTTP client.
+    from comfy_cli.builder_api import BuilderClient
+
+    counts = {"ready": 1, "failed": failed, "pending": 0, "stopped": 1}
+    monkeypatch.setattr(
+        _CutShortStatus,
+        "bodies",
+        [
+            json.dumps({"id": "release-created", "status": "building"}).encode(),
+            json.dumps({"id": "release-created", "status": "stopping"}).encode(),
+            json.dumps({"id": "release-created", "status": "stopped", "artifactCounts": counts}).encode(),
+        ],
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _CutShortStatus)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    real = BuilderClient(f"http://127.0.0.1:{server.server_address[1]}", "test-token")
+    monkeypatch.setattr(client, "get_release", real.get_release)
+
+    # When
+    try:
+        result = CliRunner().invoke(
+            cli_app,
+            ["build", "release", "create", "--target", "linux/cpu", "--watch"],
+            env={"COMFY_OUTPUT": mode, "NO_COLOR": "1", "AI_AGENT": "1", "COMFY_BUILDER_TOKEN": None},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # Then
+    assert result.exit_code == 1, result.output
+    assert _CutShortStatus.bodies == []
+    assert sleeps == [2.0, 2.0]
+    if mode == "pretty":
+        assert result.output.count("release release-created was stopped.") == 1
+        assert "unknown release status" not in result.output
+        assert "completed with failed targets" not in result.output
+        assert '"type": "envelope"' not in result.stdout
+    else:
+        messages = [json.loads(line) for line in result.stdout.splitlines()]
+        terminals = [message for message in messages if message["type"] == "envelope"]
+        assert len(terminals) == 1
+        assert messages[-1] == terminals[0]
+        if mode == "json":
+            assert len(messages) == 1
+        else:
+            assert all(message["schema"] == "event/1" for message in messages[:-1])
+        terminal = terminals[0]
+        assert terminal["ok"] is False
+        assert terminal["error"]["code"] == "build_stopped"
+        assert terminal["error"]["details"] == {
+            "releaseId": "release-created",
+            "status": "stopped",
+            "artifactCounts": counts,
+        }
+        import jsonschema
+
+        schemas = Path(__file__).resolve().parents[3] / "comfy_cli/schemas"
+        schema = json.loads((schemas / "envelope.json").read_text())
+        error_schema = json.loads((schemas / "error.json").read_text())
+        resolver = jsonschema.RefResolver(
+            base_uri=schemas.as_uri() + "/",
+            referrer=schema,
+            store={"error.json": error_schema, error_schema["$id"]: error_schema},
+        )
+        jsonschema.Draft202012Validator(schema, resolver=resolver).validate(terminal)
+
+
+@pytest.mark.parametrize("mode", ["pretty", "json", "ndjson"])
+@pytest.mark.parametrize("incomplete_final", [False, True], ids=["final-lines", "incomplete-final"])
+def test_stopped_log_follow_reads_after_terminal_status_on_the_wire(
+    client: ReleaseBuilder, sleeps: list[float], monkeypatch: pytest.MonkeyPatch, mode: str, incomplete_final: bool
+) -> None:
+    # Given: the last log becomes available only after the stopped status read.
+    from comfy_cli.builder_api import BuilderClient
+
+    def log_body(log: str) -> bytes:
+        return json.dumps(
+            {"releaseId": "release-1", "os": "linux", "gpu": "cpu", "log": log, "truncated": False}
+        ).encode()
+
+    final = log_body("started\nphase finished\nbuild stopped\n")
+    monkeypatch.setattr(
+        _CutShortStatus,
+        "bodies",
+        [
+            log_body("started\n"),
+            json.dumps({"id": "release-1", "status": "building"}).encode(),
+            log_body("started\nphase finished\n"),
+            json.dumps({"id": "release-1", "status": "stopping"}).encode(),
+            log_body("started\nphase finished\n"),
+            json.dumps({"id": "release-1", "status": "stopped"}).encode(),
+            (final, final[:20]) if incomplete_final else final,
+        ],
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _CutShortStatus)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    real = BuilderClient(f"http://127.0.0.1:{server.server_address[1]}", "test-token")
+    monkeypatch.setattr(client, "get_release", real.get_release)
+    monkeypatch.setattr(client, "get_release_logs", real.get_release_logs)
+
+    # When
+    try:
+        result = CliRunner().invoke(
+            cli_app,
+            ["build", "release", "logs", "release-1", "--target", "linux/cpu", "--follow"],
+            env={"COMFY_OUTPUT": mode, "NO_COLOR": "1", "AI_AGENT": "1", "COMFY_BUILDER_TOKEN": None},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert _CutShortStatus.bodies == []
+    assert sleeps == [2.0, 2.0]
+    expected_log = "started\nphase finished\n" if incomplete_final else "started\nphase finished\nbuild stopped\n"
+    if mode == "pretty":
+        assert result.output.count("started") == 1
+        assert result.output.count("phase finished") == 1
+        assert ("build stopped" in result.output) is (not incomplete_final)
+    else:
+        messages = [json.loads(line) for line in result.stdout.splitlines()]
+        terminals = [message for message in messages if message["type"] == "envelope"]
+        assert len(terminals) == 1
+        assert messages[-1] == terminals[0]
+        terminal = terminals[0]
+        assert terminal["ok"] is True
+        assert terminal["data"] == {
+            "releaseId": "release-1",
+            "os": "linux",
+            "gpu": "cpu",
+            "log": expected_log,
+            "truncated": False,
+        }
+        import jsonschema
+
+        schemas = Path(__file__).resolve().parents[3] / "comfy_cli/schemas"
+        error_schema = json.loads((schemas / "error.json").read_text())
+        for name, value in [("envelope.json", terminal), ("build_release_logs.json", terminal["data"])]:
+            schema = json.loads((schemas / name).read_text())
+            resolver = jsonschema.RefResolver(
+                base_uri=schemas.as_uri() + "/",
+                referrer=schema,
+                store={"error.json": error_schema, error_schema["$id"]: error_schema},
+            )
+            jsonschema.Draft202012Validator(schema, resolver=resolver).validate(value)
+    assert ("the final log read came back incomplete" in " ".join(result.output.split())) is incomplete_final
+
+
+@pytest.mark.parametrize("status", ["stopping", "stopped"])
+@pytest.mark.parametrize("verb", ["ls", "show"])
+def test_release_reads_preserve_stop_states(workspace: Path, client: ReleaseBuilder, status: str, verb: str) -> None:
+    # Given: list/show pass through status and count fields without interpreting them.
+    release = {"id": "release-1", "status": status, "artifactCounts": {"ready": 1, "stopped": 1, "pending": 0}}
+    client.releases = [release]
+    client.statuses = [release]
+
+    # When
+    result = invoke_release(verb, *(["release-1"] if verb == "show" else []))
+
+    # Then
+    assert result.exit_code == 0, result.output
+    data = envelope(result)["data"]
+    received = data["releases"][0] if verb == "ls" else data
+    assert received["id"] == "release-1"
+    assert received["status"] == status
+    assert received["artifactCounts"] == {"ready": 1, "stopped": 1, "pending": 0}
+
+
+class FullWorkspaceBuilder:
+    """A builder refusing every cut at the release limit, with two visible Builds holding releases."""
+
+    #: The host the deployments are read from too, so the two reads join.
+    target = SimpleNamespace(base_url="https://platform.test/builder")
+
+    def __init__(self, builds: list[JsonObject] | Exception | None = None) -> None:
+        self.builds = builds
+
+    def create_release(self, build_id: str, targets: list[JsonObject] | None = None) -> tuple[str, str]:
+        raise refusal(409, {"error": "RELEASE_LIMIT", "message": AT_THE_LIMIT}, "https://builder.test/v1/releases")
+
+    def list_builds(self, **_: object) -> list[JsonObject]:
+        if isinstance(self.builds, Exception):
+            raise self.builds
+        return self.builds or [{"id": "build-1", "name": "portraits"}, {"id": "build-2", "name": "upscale"}]
+
+    def list_releases(self, build_id: str, **_: object) -> list[JsonObject]:
+        return {
+            "build-1": [
+                {"id": "rel-1a", "version": 2, "createdAt": "2026-08-28T03:26:16Z"},
+                {"id": "rel-1b", "version": 1, "createdAt": "2026-08-28T03:26:16.5Z"},
+            ],
+            "build-2": [{"id": "rel-2a", "version": 1, "createdAt": "2026-08-20T00:00:00Z"}],
+        }[build_id]
+
+
+class DeploymentsOf:
+    target = SimpleNamespace(base_url="https://platform.test/deploy")
+
+    def __init__(self, rows: list[JsonObject] | Exception) -> None:
+        self.rows = rows
+
+    def list_all_deployments(self, **_: object) -> list[JsonObject]:
+        if isinstance(self.rows, Exception):
+            raise self.rows
+        return self.rows
+
+
+def _cut_refused(monkeypatch: pytest.MonkeyPatch, builder: FullWorkspaceBuilder, deployments: DeploymentsOf) -> dict:
+    from comfy_cli.command import deploy_runtime
+
+    monkeypatch.setattr(build, "_builder_client", lambda renderer, builder_url: builder)
+    monkeypatch.setattr(deploy_runtime, "deploy_client", lambda: deployments)
+    result = invoke_release("create", "--target", "linux/nvidia")
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_release_limit"
+    return error
+
+
+def test_release_limit_refusal_lists_each_visible_build_and_whether_a_deployment_uses_it(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given a stopped deployment on build-1's older release and a deleted one on build-2's
+    deployments = DeploymentsOf(
+        [
+            {"id": "dep-1", "releaseId": "rel-1b", "status": "stopped", "deletedAt": None},
+            {"id": "dep-2", "releaseId": "rel-2a", "status": "stopped", "deletedAt": "2026-08-21T00:00:00Z"},
+        ]
+    )
+
+    # When
+    error = _cut_refused(monkeypatch, FullWorkspaceBuilder(), deployments)
+
+    # Then the newest release is the later instant, not the later spelling
+    assert error["details"]["builds"] == [
+        {
+            "id": "build-1",
+            "name": "portraits",
+            "releases": 2,
+            "newestReleaseAt": "2026-08-28T03:26:16.5Z",
+            "deployments": 1,
+            "inUse": True,
+        },
+        {
+            "id": "build-2",
+            "name": "upscale",
+            "releases": 1,
+            "newestReleaseAt": "2026-08-20T00:00:00Z",
+            "deployments": 0,
+            "inUse": False,
+        },
+    ]
+    assert error["details"]["buildId"] == "build-1"
+    assert error["details"]["status"] == 409
+    assert "buildsTruncated" not in error["details"]
+    assert "comfy build release delete" in error["hint"]
+
+
+def test_the_release_limit_hint_names_release_ls_for_the_holders_and_quota_for_the_numbers(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # When
+    error = _cut_refused(monkeypatch, FullWorkspaceBuilder(), DeploymentsOf([]))
+
+    # Then
+    hint = error["hint"]
+    assert "`comfy build release ls --id <build>`" in hint
+    assert "Builds hold releases" in hint.split("`comfy build release ls")[0]
+    assert "`comfy build quota` shows how many releases are used against the limit" in hint
+
+
+class ManyFullBuilds(FullWorkspaceBuilder):
+    """One Build more than the refusal reads releases for, each holding one release."""
+
+    def list_builds(self, **_: object) -> list[JsonObject]:
+        return [{"id": f"build-{n:03}"} for n in range(101)]
+
+    def list_releases(self, build_id: str, **_: object) -> list[JsonObject]:
+        return [{"id": f"{build_id}-r0", "createdAt": "2026-08-20T00:00:00Z"}]
+
+
+def test_a_release_limit_refusal_past_100_builds_lists_the_first_100_and_says_it_was_cut_short(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # When
+    error = _cut_refused(monkeypatch, ManyFullBuilds(), DeploymentsOf([]))
+
+    # Then
+    builds = error["details"]["builds"]
+    assert len(builds) == 100
+    assert builds[-1]["id"] == "build-099"
+    assert error["details"]["buildsTruncated"] is True
+
+
+def test_release_limit_refusal_lists_builds_without_use_when_deployments_cannot_be_read(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # When
+    error = _cut_refused(monkeypatch, FullWorkspaceBuilder(), DeploymentsOf(urllib.error.URLError("down")))
+
+    # Then
+    assert [(row["id"], row["releases"]) for row in error["details"]["builds"]] == [("build-1", 2), ("build-2", 1)]
+    assert all("inUse" not in row for row in error["details"]["builds"])
+
+
+@pytest.mark.parametrize(
+    "builds",
+    [
+        pytest.param(urllib.error.URLError("down"), id="unreachable"),
+        pytest.param(refusal(500, {"error": "INTERNAL"}, "https://builder.test/v1/builds"), id="server-error"),
+        pytest.param([{"name": "no id"}], id="malformed"),
+    ],
+)
+def test_release_limit_refusal_keeps_todays_details_when_the_builds_cannot_be_read(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, builds: object
+) -> None:
+    # When
+    error = _cut_refused(monkeypatch, FullWorkspaceBuilder(builds), DeploymentsOf([]))
+
+    # Then
+    assert set(error["details"]) == {"buildId", "status", "body"}
+    assert error["message"] == AT_THE_LIMIT
+
+
+def test_create_refuses_when_neither_the_spec_nor_the_build_sets_a_comfy_version(
+    workspace: Path, client: ReleaseBuilder
+) -> None:
+    # Given: a pushed spec that never set baseComfyVersion, and a Build without one too
+    write_spec(workspace, build_id="build-1", revision="revision-1", models=[], nodes=[])
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_comfy_version_missing"
+    assert "comfy build update --comfy-version" in error["hint"]
+    assert Path(error["details"]["path"]).name == "comfy-build.yaml"
+    assert client.calls == [{"method": "get_build", "id": "build-1"}]
+
+
+def test_create_cuts_when_the_build_has_a_comfy_version_the_spec_lacks(workspace: Path, client: ReleaseBuilder) -> None:
+    # Given: the spec never set baseComfyVersion, but another writer set it on the Build
+    write_spec(workspace, build_id="build-1", revision="revision-1", models=[], nodes=[])
+    client.build = {"id": "build-1", "definition": {"baseComfyVersion": "v0.3.40"}}
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then: the cut goes out, since the builder releases its own definition
+    assert result.exit_code == 0, result.stderr
+    assert [call["method"] for call in client.calls] == ["get_build", "create_release"]
+
+
+def test_create_with_an_id_leaves_the_comfy_version_to_the_builder(workspace: Path, client: ReleaseBuilder) -> None:
+    # Given: `--id` names the Build, so the spec beside it is not what is cut
+    write_spec(workspace, build_id="build-1", revision="revision-1", models=[], nodes=[])
+
+    # When
+    result = invoke_release("create", "--id", "build-9", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [("create_release", "build-9")]
