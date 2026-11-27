@@ -13,7 +13,8 @@ never at module scope — not here and not anywhere else reachable from
 ``comfy_cli.cmdline``. ``tests/comfy_cli/test_tracking_lazy_import.py`` guards
 this: importing this module (and ``generate.app``) must not load ``comfy_sdk``
 or ``pydantic_core``. Importing this module from ``app.py`` is fine — it stays
-SDK-free at module scope.
+SDK-free at module scope. The decision is recorded in
+``docs/adr/DEPENDENCIES-0019-load-comfy-sdk-only-inside-the-router-generate-path.md``.
 
 **Auth:** the SDK sends the key as ``Authorization: Bearer`` to Router — that is
 the SDK's own contract with Router and cannot be changed from here. It is *not*

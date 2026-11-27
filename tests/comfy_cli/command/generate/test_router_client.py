@@ -8,7 +8,6 @@ accessor hands ``Comfy()``; the real import is covered in
 import os
 import sys
 import threading
-import time
 import types
 
 import pytest
@@ -123,14 +122,26 @@ def test_overlapping_calls_each_construct_against_the_bridged_url(fake_sdk, monk
     # Without serialisation, B sees A's override as a user-set Router var, skips its
     # own, and then constructs after A has restored the env — on the SDK default.
     a_in_construction = threading.Event()
+    b_entering_bridge = threading.Event()
     a_done = threading.Event()
     seen: dict[str, str | None] = {}
+    real_lock = router_client._BRIDGE_LOCK
+
+    class _SignallingLock:
+        def __enter__(self):
+            if threading.current_thread().name == "b":
+                b_entering_bridge.set()
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc):
+            return real_lock.__exit__(*exc)
 
     def comfy(**kwargs):
         name = threading.current_thread().name
         if name == "a":
             a_in_construction.set()
-            time.sleep(0.2)  # give B time to reach the bridge while A holds the override
+            # Hold A's override until B has reached the bridge.
+            assert b_entering_bridge.wait(timeout=5)
         else:
             a_done.wait(timeout=5)
         seen[name] = os.environ.get("COMFY_ROUTER_BASE_URL")
@@ -141,6 +152,7 @@ def test_overlapping_calls_each_construct_against_the_bridged_url(fake_sdk, monk
         a_done.set()
 
     monkeypatch.setattr(sys.modules["comfy_sdk"], "Comfy", comfy)
+    monkeypatch.setattr(router_client, "_BRIDGE_LOCK", _SignallingLock())
     monkeypatch.setenv("COMFY_API_BASE_URL", "https://stagingapi.example")
     a = threading.Thread(target=run_a, name="a")
     b = threading.Thread(target=router_client.router_models, args=("comfyui-k",), name="b")
