@@ -319,10 +319,13 @@ comfy deploy cancel [PATH] [--deployment <name|id>]
   that update moved to, its `baseRevision` and `kind`, as the deployment's
   `pendingUpdate` read just before the stop named it.
 - **Nothing waiting is not an error:** it exits 0 with `changed: false` and
-  `cancelledUpdate: null`, as a second cancel does. An update that was gone
-  before the stop reached the service answers the same way: it says the update
-  landed where the deployment's `revision` moved past the update's
-  `baseRevision`, and otherwise that the update is no longer waiting.
+  `cancelledUpdate: null`, as a cancel run after another one finished does. A
+  stop the service refuses with 409 `CURRENT_RELEASE` answers the same way: it
+  says the update landed where the deployment's `revision` moved past the
+  update's `baseRevision`, and otherwise that the update is no longer waiting.
+  A cancel racing another cancel can still report `changed: true` and name the
+  update: comfy-deploy accepts the stop of a copy the other cancel already
+  stopped.
 - **An unfinished cancellation still waits:** a `pendingUpdate` whose
   `status` reads `failed` is one an earlier cancel stopped, and running cancel
   again stops it again. Cancel waits for the update to end, not for its copy

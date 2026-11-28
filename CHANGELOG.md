@@ -33,8 +33,11 @@ history.
   every cancel answered `deploy_updates_unavailable`. It now stops the copy the
   deployment's `pendingUpdate` names, as the platform site does, and reads the
   deployment until that update is gone; rollbacks and GPU/region moves cancel
-  the same way. An update that landed first, or that an earlier cancel already
-  ended, exits 0 with `changed: false`. Cancel waits up to ten minutes for the
+  the same way. A deployment with nothing waiting exits 0 with `changed:
+  false`, as does a stop the service refuses with 409 `CURRENT_RELEASE`
+  because the update already landed or ended. A cancel racing another cancel
+  can still report `changed: true`: comfy-deploy accepts a stop of a copy that
+  is already stopped. Cancel waits up to ten minutes for the
   waiting update to end, not for its copy to finish stopping; an update still
   waiting after that exits 75 with `deploy_watch_lost`.
 
