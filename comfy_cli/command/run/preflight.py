@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.request
 
 import typer
 
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW
-from comfy_cli.http import plain_urlopen
+from comfy_cli.http import USAGE_SOURCE_HEADERS, plain_urlopen
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
 from comfy_cli.output.sanitize import sanitize_markup
@@ -43,7 +44,7 @@ def fetch_object_info(host, port, timeout):
     renderer = get_renderer()
     url = f"http://{host}:{port}/object_info"
     try:
-        with plain_urlopen(url, timeout=timeout) as resp:
+        with plain_urlopen(urllib.request.Request(url, headers=USAGE_SOURCE_HEADERS), timeout=timeout) as resp:
             body = resp.read(_MAX_OBJECT_INFO_BYTES)
     except urllib.error.HTTPError as e:
         body_text = e.read(_MAX_OBJECT_INFO_BYTES).decode("utf-8", errors="replace").strip()

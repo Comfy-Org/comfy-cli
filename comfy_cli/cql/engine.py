@@ -27,7 +27,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from comfy_cli.cql._net import is_loopback_host
-from comfy_cli.http import NoRedirectHandler, build_http_only_opener
+from comfy_cli.http import USAGE_SOURCE_HEADERS, NoRedirectHandler, build_http_only_opener
 
 # ---------------------------------------------------------------------------
 # Types — mirrors nodegraph/types.go
@@ -4381,7 +4381,7 @@ def _load_from_target(*, mode: str = "local", host: str | None = None, port: int
                 ),
             )
 
-    req = urllib.request.Request(url)
+    req = urllib.request.Request(url, headers=USAGE_SOURCE_HEADERS)
     req.add_header("Accept", "application/json")
 
     # Auth headers (cloud only — local has no auth)
