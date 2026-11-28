@@ -2875,6 +2875,25 @@ class TestExecuteCloudSpendGate:
             mock_target.assert_not_called()
             MockClient.assert_not_called()
 
+    def test_cloud_spend_gate_fires_before_the_library_lookup(self, tmp_path, monkeypatch):
+        # Preflight may look a refused model up in the workspace's library, which
+        # resolves a cloud credential; the spend gate must refuse before that.
+        from comfy_cli.command.run import execute_cloud
+
+        monkeypatch.setattr("comfy_cli.command.run.sys.stdin.isatty", lambda: False, raising=False)
+        with (
+            patch("comfy_cli.cql.engine._load_from_target", return_value=self.CLOUD_OI),
+            patch("comfy_cli.command.run._preflight_validate") as preflight,
+            patch("comfy_cli.cloud_own_models.for_cloud") as for_cloud,
+            patch("comfy_cli.target.resolve_target") as mock_target,
+        ):
+            with pytest.raises(typer.Exit) as exc:
+                execute_cloud(self._wf(tmp_path), wait=False)
+            assert exc.value.exit_code == 1
+            preflight.assert_not_called()
+            for_cloud.assert_not_called()
+            mock_target.assert_not_called()
+
     def test_cloud_partner_node_allow_spend_proceeds(self, tmp_path):
         from comfy_cli.comfy_client import SubmitResult
         from comfy_cli.command.run import execute_cloud

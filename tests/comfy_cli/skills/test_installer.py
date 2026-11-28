@@ -566,7 +566,7 @@ def test_run_on_cloud_skill_runs_unproven_models_on_clouds_copy_and_names_them()
     unproven model in the report. A model proven different blocks instead."""
     text = " ".join(skill_content("comfy-run-on-cloud").split())
     assert "Use Cloud's copy; step 6 asks before a paid test run" in text
-    assert "ran on Cloud's copy unproven" in text
+    assert "one line for the models that run on Cloud's copy unproven" in text
     assert "`different_file`" in text
     assert "Ask: use Cloud's copy" not in text
 
@@ -577,7 +577,7 @@ def test_run_on_cloud_skill_requires_separate_consent_for_one_paid_job():
     assert "including validation or preflight jobs" in text
     assert "Approval for uploads, swaps, builds or deployments is not approval to run a job" in text
     assert "A yes covers one job" in text
-    assert "Ask again before submitting another paid job" in text
+    assert "A yes to a test job stands for this workflow: never ask it twice" in text
     assert "running it on Comfy Cloud (each run costs credits)" not in text
 
 
@@ -593,32 +593,48 @@ def test_run_on_cloud_skill_saves_without_running_when_consent_is_declined_or_pe
     assert '"prepared, not run' not in text
 
 
-def test_run_on_cloud_skill_builds_from_the_whole_install():
-    """A custom build for a local workflow takes the whole install: the pack
-    versions installed and the models it holds, each with its folder and hash.
-    Building from the workflow alone (`--from-workflow`) picks the newest
-    version of each pack and starts with no models."""
-    run = " ".join(skill_content("comfy-run-on-cloud").split())
-    assert "--from-workflow" not in run
-    assert "Build from the whole install that serves `<server>`, by comfy-build's Path A" in run
-    build = " ".join(skill_content("comfy-build").split())
-    assert "carries only what that workflow loads" not in build
-    assert "a build it needs is made from the whole install (Path A)" in build
-
-
-def test_run_on_cloud_skill_gates_a_custom_build_on_one_plan_yes():
-    """Step 4's custom build is a short pointer to comfy-build Path A with one
-    yes to the plan before anything uploads, and the upload rule says that yes
-    covers the build's uploads."""
+def _run_on_cloud_custom_build_section() -> str:
     text = skill_content("comfy-run-on-cloud")
-    step = text[text.index("4. **A custom build.**") : text.index("| kind | what counts |")]
-    assert len(step.splitlines()) <= 10
-    step = " ".join(step.split())
-    assert "by comfy-build's Path A" in step
-    assert "show the plan and get one yes" in step
-    assert "`--min 0 --max 1` workers" in step
-    assert "Nothing uploads before that yes" in step
-    assert "A custom build's plan yes (step 4) covers its uploads" in " ".join(text.split())
+    start, end = "### A custom build", "**Making a swap.**"
+    assert start in text and end in text, f"custom-build section markers changed: {start!r} / {end!r}"
+    return " ".join(text[text.index(start) : text.index(end)].split())
+
+
+def test_run_on_cloud_skill_asks_before_changing_nodes():
+    """A missing node type with no fitting build is the person's choice: change
+    the workflow (each change listed, controls they lose named) or keep it as
+    it is with a custom build. Replacing a switch with fixed wiring keeps the
+    saved output but takes a control away, so it is never called lossless."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "**changing the workflow's nodes** so it runs on Comfy Cloud, lossless or not" in text
+    assert "Never change a node on your own" in text
+    assert "**Change the workflow so it runs on Comfy Cloud.**" in text
+    assert "**Keep the workflow as it is: create a custom build**, offered as its two build-from options" in text
+    assert "One line per missing node type, with its count: `original ×n -> replacement`" in text
+    assert "any control the person loses" in text
+    assert "| Removes a control |" in text
+    assert "Never call this lossless, even when the output for the saved settings is the same" in text
+    assert "made on a copy without asking" not in text
+    assert "lossless changes made on a copy" not in text
+
+
+def test_run_on_cloud_skill_asks_what_a_custom_build_is_built_from():
+    """The custom build asks: the local installation (the default; runs other
+    workflows too, slower start, more storage) or just this workflow
+    (`--from-workflow`). It checks the server loads the missing node types
+    before offering the installation, and recommends the workflow when not."""
+    step = _run_on_cloud_custom_build_section()
+    assert "**Your local installation.**" in step
+    assert "Your local installation is the default, unless the check below finds it cannot run the workflow" in step
+    assert "can then run your other workflows too" in step
+    assert "it is bigger: slower to start and more storage" in step
+    assert "**Just this workflow.**" in step
+    assert "`init --from-workflow` on `<work>/original.json`" in step
+    assert '`curl -sf "<server>/api/object_info/<node type, percent-encoded>"`' in step
+    assert "still ask, never choose for the person" in step
+    assert "recommend **Just this workflow**" in step
+    build = " ".join(skill_content("comfy-build").split())
+    assert "whole install (Path A, the default) or from the workflow alone (Path B)" in build
 
 
 def test_run_on_cloud_skill_passes_the_server_to_init():
@@ -626,19 +642,69 @@ def test_run_on_cloud_skill_passes_the_server_to_init():
     has no version marker (split and Desktop layouts), and defaults to port
     8188. A server on another port must be passed, or the spec has no base
     version and the release is refused after the yes."""
-    text = skill_content("comfy-run-on-cloud")
-    step = text[text.index("4. **A custom build.**") : text.index("| kind | what counts |")]
-    assert "pass `<server>` to `init` as `--comfy-url`" in " ".join(step.split())
+    assert "comfy-build's Path A, with `--comfy-url <server>`" in _run_on_cloud_custom_build_section()
 
 
-def test_run_on_cloud_skill_plan_is_comfy_builds_before_you_cut():
-    """The one yes covers comfy-build's whole "Before you cut" plan (every file
-    in a local pack uploads, Git packs with uncommitted edits, its own
-    questions), plus the GPU, region, cost and workers."""
-    text = skill_content("comfy-run-on-cloud")
-    step = " ".join(text[text.index("4. **A custom build.**") : text.index("| kind | what counts |")].split())
-    assert 'comfy-build\'s "Before you cut" plan' in step
-    assert "(count and total size)" not in step
+def test_run_on_cloud_skill_asks_the_machine_and_shows_costs_from_the_backend():
+    """The GPU is its own question with a recommendation, and the plan's yes
+    comes with a cost table: GPU per hour, scale to zero and storage, every
+    price read from `deploy refs compute`, plus what storing a model in the
+    build means for cold starts."""
+    step = _run_on_cloud_custom_build_section()
+    assert "**2. The machine.** The VRAM depends only on the models the workflow loads, not on 1" in step
+    assert "List every GPU that fits, cheapest first" in step
+    assert "recommend one with the reason" in step
+    assert "`pricePerHourUsd`" in step
+    assert "`storage[].pricePerGbMonthUsd`" in step
+    assert "never from memory" in step
+    assert "scales to zero when idle" in step
+    assert "downloaded every time a worker starts" in step
+    assert "`--min 0 --max 1`" in step
+
+
+def test_run_on_cloud_skill_gates_a_custom_build_on_one_plan_yes():
+    """One yes to comfy-build's "Before you cut" plan and the cost table before
+    anything uploads, and that yes covers the build's uploads."""
+    step = _run_on_cloud_custom_build_section()
+    assert "Nothing uploads, builds or deploys before that yes" in step
+    assert 'For each build option, show comfy-build\'s "Before you cut" plan' in step
+    assert "Ask 1 and 2 in the first stop, each its own question, never deciding either for the person" in step
+    assert (
+        "ask again only if it would send more than the plan showed or add a pack or model the plan did not name" in step
+    )
+    assert "the release policy stays open (no restriction on models or partner nodes): say so, do not ask" in step
+    assert "The plan's yes covers the uploads it lists" in step
+    assert "A custom build's plan yes (step 4) covers its uploads" in " ".join(
+        skill_content("comfy-run-on-cloud").split()
+    )
+
+
+def test_run_on_cloud_skill_sets_the_build_time_expectation():
+    step = _run_on_cloud_custom_build_section()
+    assert 'even though the cost table said it: "The build usually takes 5–15 minutes."' in step
+    assert "Right before the first `comfy build push` without `--dry-run`" in step
+
+
+def test_run_on_cloud_skill_replaces_its_own_save_instead_of_duplicating():
+    """A second save in the same conversation replaces the first (guarded by its
+    sha256); a save from an earlier session is replaced only after asking once."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "You already saved this workflow in this conversation:** replace that save, without asking" in text
+    assert "--replace '<filename>' --expected-sha256 <sha256>" in text
+    assert "`<work>/saved.json` was already there when you started" in text
+    assert "ask once" in text
+    assert "`workflow_replace_changed`" in text
+    assert "`workflow_replace_missing`" in text
+    assert "never replaces a file" not in text
+
+
+def test_run_on_cloud_skill_ends_with_a_short_summary_and_the_link():
+    """The final message is a status line, a brief summary, then the link with a
+    call to action; no step-by-step account or invented "what's next"."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert 'No step-by-step account, "what\'s next" section, tips' in text
+    assert '"Open it to run your workflow on Comfy Cloud: `<data.url>`"' in text
+    assert "**The link, last**" in text
 
 
 def test_build_skill_says_uncommitted_edits_in_a_git_pack_stay_behind():
@@ -779,10 +845,10 @@ def test_run_on_cloud_skill_holds_deployment_uploads_until_asked():
     assert "--no-upload" in text
     assert "deploy_asset_missing" in text
     assert "`details.missing[]` is the exact upload plan" in text
-    assert "`local_path` (the full path it picked)" in text
+    assert "`details.missing[]` is the exact upload plan, one entry per file with `local_path`" in text
     assert "--allow-upload <hash>" in text
     assert "never pass a hash nobody approved" in text
-    assert "It hashes a private copy of each file it uploads and sends that copy" in text
+    assert "It sends a private copy of only those files" in text
     assert "data.assets.files[]" in text
     # The old self-built list, from the tracked workspace only, is gone.
     assert "jq -r '[.[].inputs" not in text
@@ -794,9 +860,9 @@ def test_run_on_cloud_skill_asks_again_only_when_there_is_a_local_plan():
     reach (`details.server_code` `missing_asset`, with no `details.missing[]`).
     Asking again about local files is only for a refusal that lists them."""
     text = " ".join(skill_content("comfy-run-on-cloud").split())
-    assert "`details.missing[]` is there: a file differs from the approved plan" in text
-    assert "`details.server_code` is `missing_asset`" in text
-    assert "Report that asset as unreachable" in text
+    assert "with `details.missing[]`, a file differs from the approved plan" in text
+    assert "with `details.server_code` `missing_asset`" in text
+    assert "report it as unreachable and that the workflow has not run" in text
 
 
 def test_run_on_cloud_skill_reads_the_save_warning_for_a_missing_link():
@@ -855,6 +921,8 @@ def test_run_on_cloud_skill_explains_workflow_and_folder_links():
         "`record_ambiguous`",
         "`record_lookup_failed`",
         "`workflow_record_unknown`",
+        "`record_stale`",
+        "`workflow_record_stale`",
         "Cloud checks the link against the saved file when it opens",
         "not listed here as `folder`",
         "`data.filename`",
@@ -870,11 +938,11 @@ def test_comfy_skill_reads_an_unknown_link_value_as_folder():
     assert "treat a value not listed here as `folder`" in text
 
 
-def test_run_on_cloud_skill_asks_before_every_upload_and_lossy_swap():
+def test_run_on_cloud_skill_asks_before_every_upload_and_node_change():
     text = " ".join(skill_content("comfy-run-on-cloud").split())
     assert "uploading any file from this machine" in text
-    assert "Ask by file name" in text
-    assert "A lossy swap**, asked first" in text
+    assert "by file name, one line per file: path, size, what it is for, where it goes" in text
+    assert "No build fits: ask whether to change the workflow or build." in text
 
 
 def test_run_on_cloud_prompt_template_loads_the_skill():
@@ -1691,7 +1759,7 @@ def test_run_on_cloud_skill_confirms_the_server_and_keeps_files_in_its_folder():
     assert '"<server>/api/models/<folder>"' in text
     assert "Name slots in `connect`, never their numbers" in text
     assert "lists a node's inputs and outputs by name" in text
-    assert "the server's answer proves nothing" in text
+    assert "When the item's `folder` is null or the lookup fails, ask where the model is" in text
     assert '> "<work>/preview.json"' in text
     assert '--workflow "<work>/api.json"' in text
     assert "> preview.json" not in text
@@ -1703,10 +1771,10 @@ def test_run_on_cloud_skill_asks_about_the_exact_input_and_partner_spend():
     bytes that are uploaded; partner-API nodes spend credits beyond the run, so
     `spend_consent_required` is asked about before `--allow-spend`."""
     text = " ".join(skill_content("comfy-run-on-cloud").split())
-    assert "fetch it from the local server before you ask" in text
+    assert "fetch it from the local server before the first stop, then ask there" in text
     assert "shasum -a 256 '<work>/inputs/<subfolder>/<file>'" in text
     assert "--create-dirs -o '<work>/inputs/<subfolder>/<file>'" in text
-    assert "Do not fetch it again" in text
+    assert "upload that same file without fetching it again" in text
     assert "`spend_consent_required`" in text
     assert "`--allow-spend`" in text
 
@@ -1909,6 +1977,193 @@ def test_deploy_skills_say_a_file_being_removed_while_added_is_added_again_only_
     assert "`comfy deploy models ls <deployment>` no longer lists it" in row
     deploy = " ".join(skill_content("comfy-deploy").split())
     assert "`deploy_model_removed` (once `ls` no longer lists it, add it again)" in deploy
+
+
+def test_run_on_cloud_skill_reuses_stopped_and_undeployed_builds():
+    """An existing build that fits may be served only by a stopped deployment,
+    or by none; both are checked before any conversion or new build."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "look at every build, not only running ones" in text
+    assert "`comfy --json deploy ls --workspace`: every deployment, running or stopped" in text
+    assert "`comfy --json build release ls --id <build id>`" in text
+    assert "Only a stopped one: ask for a yes to start that deployment" in text
+    assert "None: ask for a yes to deploy that release" in text
+
+
+def test_run_on_cloud_skill_never_saves_a_blocked_setup_or_an_unapproved_change():
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "Do not save when setup is blocked" in text
+    assert "A missing input file does not block the save" in text
+    assert "make `cloud.json` again from `original.json`" in text
+    assert "never save a copy that carries a change they did not approve" in text
+    assert "Never offer, suggest or invite another model in its place" in text
+    assert "do not pick it yourself" in text
+
+
+def test_run_on_cloud_skill_names_missing_inputs_instead_of_ready():
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "Your workflow is saved on Comfy Cloud, but it needs `<file names>` before it can run." in text
+    assert "Never call it ready while an input or model is missing" in text
+    assert "Do not search the disk for it and do not use another file" in text
+
+
+def test_run_on_cloud_skill_runs_each_readiness_check_as_its_own_call():
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "Run each of these as its own shell call, never joined with `&&`, `;` or `||`" in text
+
+
+def test_run_on_cloud_skill_asks_with_question_cards():
+    """Choices and every yes the skill waits for go in the client's question
+    tool (Claude Code's `AskUserQuestion`), each card complete on its own, with
+    long detail in the message before it; numbered options only without one."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "Ask with your client's question tool when it has one" in text
+    assert "every choice and every yes, with the yes and the no as options" in text
+    assert "(`AskUserQuestion` in Claude Code; `request_user_input` or `request_user_input_async` in Codex)" in text
+    assert "end your turn after asking, and do nothing the question decides until the reply arrives" in text
+    assert "Keep each card short but complete on its own" in text
+    assert "goes in your message right before the card" in text
+    assert "Without a question tool, number the options" in text
+
+
+def test_run_on_cloud_skill_asks_once_then_runs_to_the_end():
+    """Every question the person can answer up front goes in one stop after a
+    read-only preparation, a custom build's base, GPU and plan included; then
+    the work runs to the link."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "## Ask once, then run to the end" in text
+    assert "**Prepare, asking nothing.**" in text
+    assert "**One stop with every question that applies:**" in text
+    assert "a custom build offered as its two build-from options; the GPU, when a build is offered" in text
+    assert "the paid test (step 6), once for whichever route they pick" in text
+    assert "**Then work to the end without stopping:**" in text
+    assert "Ask again only for what no answer covered" in text
+    assert "so picking a build is the plan's yes" in text
+    assert "Otherwise ask in the first stop, once for whichever route they pick" in text
+    assert "the first stop asked once, naming its `filename` and `saved_at`" in text
+
+
+def test_run_on_cloud_skill_remembers_a_test_job_yes():
+    """A yes to a test job is recorded and not asked again for a retry; one
+    from an earlier session counts only for the same workflow, server, ComfyUI
+    user, target, GPU, quoted price and unchanged file. A new target or unnamed partner node needs a new yes, a no
+    is not remembered, and nothing resubmits on its own."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "Right after the person says yes, write `<work>/consent.json`" in text
+    assert '"sha256": "<shasum -a 256 of the file the test runs>"' in text
+    assert '"user": "<ComfyUI user or empty>"' in text
+    assert '"workspace": "<cloud_workspace.id>"' in text
+    assert "do not ask again for a retry they ask for" in text
+    assert "run the test and say it ran on their earlier yes" in text
+    assert "that yes is the ask the prompt requires" in text
+    assert (
+        "A `consent.json` from an earlier session counts the same only when its `workflow`, `server`, `user`, "
+        "`workspace`, `target`, `gpu` and `price` match this run (the price you would quote now) and "
+        "`shasum -a 256` of the file the test runs, taken right before you submit it, still equals its "
+        "`sha256`; otherwise ask again" in text
+    )
+    assert "ask again when the target moves to another deployment or GPU" in text
+    assert "A no is not remembered" in text
+    assert "never submit a second on your own" in text
+    assert "a retry the person asks for runs on their earlier yes" in text
+    assert "If the test's yes named them, run the same command with `--allow-spend`" in text
+
+
+def test_run_on_cloud_skill_finds_a_model_source_and_offers_ways_to_unblock():
+    """A model with no local copy is looked up on Hugging Face by name and
+    verified by sha256 before it is called missing; a blocked setup ends by
+    asking how to unblock it, never with a substitute model."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "**Finding a model's source**, while preparing" in text
+    assert "--data-urlencode 'search=<file name without extension>'" in text
+    assert "https://huggingface.co/api/models/<repo>/tree/main?recursive=true" in text
+    assert "Only a file of the exact name counts" in text
+    assert "It is the person's file when its sha256 matches their local copy" in text
+    assert "Otherwise offer it in the first stop (repo and size) and use it after a yes" in text
+    assert "when its `size` matches that copy's (`comfy --json model show '<file>' --where cloud`)" in text
+    assert "its upload dry run (below) says `already_present`" in text
+    assert "but it can prove a public copy is the same file" in text
+    assert "a private upload in the workspace's model library is not one" in text
+    assert "or do you have a download link?" in text
+    assert (
+        "A class no repository there provides blocks the build: build nothing, name it and ask how to unblock it"
+        in text
+    )
+    assert "Then ask how to unblock it, as choices" in text
+    assert "such as changing the workflow when 4.2 offered it" in text
+    assert "never name or invite another model in its place" in text
+    assert "except a near-name file (step 5)" in text
+    assert "use one only after the person picks it, and only on the copy" in text
+    assert "a name that differs only in case, separators or a version (`AlbedoBaseXL` and `albedobaseXL_v04`)" in text
+    assert "--where cloud --mine-only" in text
+    assert (
+        "Offer up to three in the first stop, or in the blocked report's question, each by name, place and size" in text
+    )
+    assert "no workaround" not in text
+
+
+def test_run_on_cloud_skill_places_unattributed_nodes_and_finds_pack_models():
+    """A class the probe cannot attribute is looked up in ComfyUI-Manager's node
+    map and added by its repository before the build is called impossible; a
+    model's source search runs even when a node blocks, and reads the item's
+    url and the loading pack's README first."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "https://raw.githubusercontent.com/ltdrdata/ComfyUI-Manager/main/extension-node-map.json" in text
+    assert "prefer one repository that provides every such class, add it to the build by its GitHub URL" in text
+    assert "any model its README says it loads on its own (InsightFace's antelopev2 for InstantID)" in text
+    assert "**Finding a model's source**, while preparing, even when a node also blocks" in text
+    assert "the README of the pack whose node loads it, which often links its models" in text
+
+
+def test_run_on_cloud_skill_stops_cleanly_when_the_cli_rejects_a_private_upload():
+    """`run` and `set-widget` look an upload up in the workspace's library, so
+    an upload still refused is a real blocker: reported, never edited around,
+    and not saved."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "`run` and `set-widget` look a model up in the workspace's Cloud model library before refusing it" in text
+    assert "the library does not hold it under that name, or the lookup failed; the error's hint says which" in text
+    assert "Never hand-edit around it: report it as the blocker, with no save" in text
+
+
+def test_run_on_cloud_skill_keeps_state_files_to_their_own_workflow():
+    """The work folder comes from the whole path, and saved.json and
+    consent.json name the workflow, server and ComfyUI user, so one workflow
+    (or one user's copy of it) never reuses another's paid-test yes or save. A record-only save is not replaced."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "plus the workflow's path after `workflows/` (subfolders included, no `.json`)" in text
+    assert "`team/My flow (2)` gives `run-on-cloud/team-My-flow--2-`" in text
+    assert (
+        "the ComfyUI `user` (empty without a `ComfyUI user:` line) and the `workspace` (`cloud_workspace.id`)" in text
+    )
+    assert "ignore either file when any of them differs from this run's" in text
+    assert "a save with no `filename` (record-only) is replaced by a plain save" in text
+    assert "`--expected-sha256` goes only with a `sha256` that is set" in text
+    assert "plus the `workflow` path, the `server` URL, the ComfyUI `user`, the `workspace` and `saved_at`" in text
+
+
+def test_run_on_cloud_skill_quotes_every_file_placeholder():
+    """A file name from the workflow never reaches the shell unquoted."""
+    text = skill_content("comfy-run-on-cloud")
+    assert "--workflow <file>" not in text
+    assert "workflow save <file>" not in text
+    assert '"https://huggingface.co/api/models?search=' not in text
+    assert "--text '<name without version>'" in text
+
+
+def test_run_on_cloud_skill_shows_the_steps_left_as_a_checklist():
+    """After the first stop's answers, the remaining work shows as a checklist
+    in the client's plan tool and is marked as it goes."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "Right after the answers, show the steps left as a checklist with your client's plan tool" in text
+    assert (
+        "`TaskCreate` and `TaskUpdate`, or `TodoWrite` in older versions; `update_plan` in Codex; load a deferred one first"
+        in text
+    )
+    assert "Mark each as it starts and ends" in text
+    assert (
+        "Without a plan tool, post the steps once as a numbered list, then start each progress line with its number and the total"
+        in text
+    )
 
 
 # ---------------------------------------------------------------------------

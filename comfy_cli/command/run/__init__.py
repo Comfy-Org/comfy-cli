@@ -1441,20 +1441,11 @@ def execute_cloud(
     # Only the targets' subgraph runs on a targeted submit (see `execute`).
     run_graph = target_subgraph(parsed_workflow, output_node_ids) if output_node_ids else parsed_workflow
 
-    # Pre-submit validation via pure-Python CQL engine.
-    _preflight_validate(
-        renderer,
-        run_graph,
-        cloud_object_info,
-        target_label="cloud",
-        where="cloud",
-        submitted_workflow=parsed_workflow,
-    )
-
     # Spend gate: the cloud also bills partner-API nodes, so apply the
     # same consent interlock as the local path before authenticating/submitting.
     # Fail-open on detection (empty cloud object_info → no gate), and fire before
-    # Client() so a refusal never triggers cloud auth.
+    # preflight's library lookup and Client(), so a refusal never resolves a
+    # cloud credential.
     partner_nodes = _consent_partner_nodes(
         parsed_workflow, cloud_object_info, _detect_partner_nodes(run_graph, cloud_object_info), output_node_ids
     )
@@ -1463,6 +1454,22 @@ def execute_cloud(
         partner_nodes,
         allow_spend,
         details={"partner_nodes": partner_nodes, "where": "cloud"},
+    )
+
+    # Pre-submit validation via pure-Python CQL engine. Cloud's object_info never
+    # lists the workspace's uploaded models, so a model value it refuses is first
+    # looked up in the workspace's library; credentials are resolved only then,
+    # after the spend gate above.
+    from comfy_cli import cloud_own_models
+
+    _preflight_validate(
+        renderer,
+        run_graph,
+        cloud_object_info,
+        target_label="cloud",
+        where="cloud",
+        submitted_workflow=parsed_workflow,
+        own_models=cloud_own_models.for_cloud(),
     )
 
     target = resolve_target(where="cloud")

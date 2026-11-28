@@ -87,7 +87,8 @@ def _fetch_model_assets(target, name: str, *, include_public: bool) -> list[dict
     ``name_contains`` is a substring match, so the exact file can sit past the
     first page; an answer from part of the list could call a model missing.
     Raises on any failure, a list that never ends included; callers decide what
-    it means.
+    it means. A redirect is refused rather than followed with the credential on
+    it: ``run`` and ``set-widget`` make this lookup on their own, unasked.
     """
     import urllib.parse
 
@@ -105,7 +106,7 @@ def _fetch_model_assets(target, name: str, *, include_public: bool) -> list[dict
                 "offset": offset,
             }
         )
-        _, body = http_request(target.url("assets") + "?" + query, target, strict_json=True)
+        _, body = http_request(target.url("assets") + "?" + query, target, strict_json=True, follow_redirects=False)
         rows = body.get("assets") if isinstance(body, dict) else None
         if not isinstance(rows, list):
             raise ValueError("unexpected response shape from /api/assets (expected an object with assets[])")

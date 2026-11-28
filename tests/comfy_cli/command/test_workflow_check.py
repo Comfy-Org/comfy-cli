@@ -422,3 +422,61 @@ def test_model_list_failure_is_an_error_not_a_missing_model(cloud, monkeypatch, 
     wf = _write(tmp_path, _ui((1, "LoraLoader", ["mine.safetensors", 1, 1])))
     error = _err(_run([str(wf), "--where", "cloud"], capsys), "cloud_unauthorized")
     assert error["details"]["operation"] == "model lookup"
+
+
+def test_the_model_lookup_never_follows_a_redirect_with_the_credential():
+    """`run` and `set-widget` make this lookup unasked, so a 30x from the model list
+    is refused: the API key never reaches the host it points at."""
+    import http.server
+    import threading
+
+    from comfy_cli.command import cloud_http
+    from comfy_cli.command.workflow_check import _fetch_model_assets
+    from comfy_cli.target import Target
+
+    seen: list[str | None] = []
+
+    class Elsewhere(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.headers.get("X-API-Key"))
+            body = b'{"assets": []}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    other = http.server.HTTPServer(("127.0.0.1", 0), Elsewhere)
+
+    class Redirecting(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{other.server_port}/elsewhere")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    cloud = http.server.HTTPServer(("127.0.0.1", 0), Redirecting)
+    servers = (other, cloud)
+    for server in servers:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        target = Target(
+            kind="cloud", base_url=f"http://127.0.0.1:{cloud.server_port}", path_prefix="/api", api_key="secret"
+        )
+        # Control: the default opener follows it and copies the key across.
+        cloud_http.http_request(target.url("assets"), target)
+        assert seen == ["secret"]
+        seen.clear()
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            _fetch_model_assets(target, "mine.safetensors", include_public=False)
+        assert caught.value.code == 302
+        assert seen == []
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()

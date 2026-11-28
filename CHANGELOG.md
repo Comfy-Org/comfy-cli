@@ -17,6 +17,14 @@ history.
 
 ### Added
 
+- `comfy workflow save --where cloud --replace <data.filename>` overwrites the
+  Workflows-sidebar file an earlier save made instead of making a new folder
+  (only an existing file; `workflow_replace_missing` otherwise), and
+  `--expected-sha256 <data.sha256>` refuses with `workflow_replace_changed`
+  when it was edited on Cloud since. Sidebar saves now return `replaced` and
+  `sha256`. A replace links the workflow only when Cloud's record of it shows
+  the new content; otherwise the link opens the folder (`record_stale`, with a
+  `workflow_record_stale` warning).
 - `comfy workflow define-subgraph <file> <definition-file> [--id <uuid>]`
   emits one `define_subgraph` op for the cloud merge consumer without touching
   the local workflow file. The id comes from `--id`, the definition's own `id`,
@@ -81,6 +89,15 @@ history.
   now gets the ranked shortlist the resolver computed instead of a catalog it
   has to search by hand.
 
+- The `comfy-run-on-cloud` skill prepares everything it can without asking,
+  then asks every question in one stop (as question cards where the client has
+  them) and runs to the link without stopping again. It offers changing the
+  workflow or keeping it and making a custom build as one choice, the build
+  from the whole install or from the workflow alone, with the GPU and a cost
+  table; remembers a test-job yes for retries of the same workflow; shows the
+  steps left as a checklist; looks for a missing model's public source and
+  offers same-name variants only as a choice; ends a blocked report with ways
+  to unblock it; and replaces its earlier save with `workflow save --replace`.
 - `comfy build push` refuses a local custom node over 2 GiB before it uploads
   anything, and names the node, its size and the limit. It packages the custom
   nodes before it hashes any model, so the refusal comes before a long model
@@ -123,6 +140,20 @@ history.
 
 ### Fixed
 
+- `comfy run --where cloud` and `comfy workflow set-widget --where cloud` no
+  longer refuse a model the workspace uploaded to its Comfy Cloud model library
+  (`comfy model upload`). Cloud's node list only offers Cloud's own models, so
+  the pre-submit check failed every upload with `unknown_enum_value` (`run`:
+  `workflow_unknown_nodes`), although Cloud runs it. Before refusing a model
+  file value of an input that picks a model file, both commands now look it up
+  in the library, by the same lookup and matching rule as `comfy workflow
+  check`, and accept a value found there.
+  A model nobody holds is still refused, and the hint now says what the library
+  said: no such model, the upload's name when it sits under another folder, or
+  that the library could not be read. A workflow that names only Cloud's own
+  models makes no extra request. The library lookup, `comfy workflow check`'s
+  included, refuses a redirect instead of following it with the Cloud
+  credentials attached.
 - A `comfy workflow set-widget` edit keeps the frontend's name-keyed
   `widgets_values_named` register coherent, not just on DynamicGroup nodes.
   Editing any ordinary node published the new value positionally and left the

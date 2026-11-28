@@ -48,11 +48,26 @@ open the file.
 - Otherwise the link stays the folder link. `data.url_opens` is `workflow` or
   `folder`, or null with no link. For a folder link, `data.folder_link_reason`
   is `workflow_links_off`, `record_not_found`, `record_ambiguous` or
-  `record_lookup_failed`. The last three also carry the existing
+  `record_lookup_failed`, or `record_stale` after a replace (below). The
+  `record_*` reasons other than `record_stale` also carry the existing
   `workflow_record_unknown` warning.
 - `workflow_id` keeps naming the record that `workflow get` and
   `workflow delete` take. Record-only, API-format and local saves do not
   change.
+
+### A replaced file (`--replace`)
+
+Amended 2026-11-25 for ADR-SIDEBAR-0009's `--replace`. The amendment is
+accepted on merge of the pull request that makes it (comfy-cli#1197), after
+its review.
+
+- A replace adds a version to a record that already exists, and Cloud answers
+  the file write 200 even when that copy fails. So after a replace the CLI
+  reads the record's latest content (`GET /api/workflows/{id}/content`) and
+  prints the `workflowId` link only when it equals the bytes written.
+- Otherwise, or when that read fails, the link is the folder link with
+  `folder_link_reason` `record_stale` and a `workflow_record_stale` warning.
+  `workflow_id` still names the record.
 
 ## Alternatives considered
 
@@ -83,8 +98,9 @@ open the file.
   with it.
 - Cloud turns workflow links on or off for every installed CLI without a
   release. Off restores the folder link.
-- The save makes no new request. The record search it uses already ran to
-  report `workflow_id`.
+- A new-folder save makes no new request. The record search it uses already
+  ran to report `workflow_id`. A replace makes one, to read the record's
+  content.
 
 ### Negative
 
@@ -104,7 +120,8 @@ split across pages, a failed or unreadable search and a search past the page
 cap each keep the folder link with their reason; deployment and an unknown
 workspace follow the folder link's rules. `TestSaveFlagOffKeepsTheRecordSave`
 keeps the record-only save when sidebar saving is off and workflow links are
-on.
+on. `TestSaveReplace` covers a replace whose record kept its old content, or
+whose content read failed: each links the folder with `record_stale`.
 
 ## Revisit triggers
 

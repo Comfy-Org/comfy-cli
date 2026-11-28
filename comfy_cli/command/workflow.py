@@ -1424,6 +1424,13 @@ def _local_delete(renderer, target, workflow_id: str) -> None:
 # Workflow-id links: docs/adr/SIDEBAR-0013-link-a-cloud-save-to-the-workflow-it-made.md.
 # The file is written with ``overwrite=false``, so nothing that exists is
 # ever replaced: a name already taken moves on to ``<name> (2)``, ``(3)``, ...
+# The one exception is explicit, never automatic: ``--replace <filename>``
+# writes over the sidebar file an earlier save returned as ``data.filename``,
+# and only when a read shows that file exists. ``--expected-sha256`` (the
+# ``data.sha256`` that save returned) refuses the write when the file's bytes
+# changed since, so an edit made in the browser is not overwritten. Cloud's
+# file POST takes no condition, so an edit that lands between that read and
+# the write is still lost; the window is one round trip.
 # Only a frontend-format workflow goes into a folder, since the sidebar opens
 # files as editor graphs. The CLI never deletes a sidebar file: Cloud's file
 # DELETE takes no condition, so it could remove an edit made in the browser
@@ -1451,6 +1458,9 @@ _STANDARD_DEPLOYMENT = "standard"
 
 # Workspace and deployment ids that go into the link as they are.
 _LINK_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+
+# A sha256 hex digest, as ``--expected-sha256`` takes it.
+_SHA256_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
 
 # Pages of ``GET /api/workflows?name=`` read when looking for a record by its
 # exact name. The search is a substring match, so a common name can return
@@ -1618,6 +1628,22 @@ def _cloud_saved_record(target, name: str) -> tuple[dict | None, str | None]:
     return rows[0], None
 
 
+def _cloud_record_holds(target, workflow_id: str, data: bytes) -> bool:
+    """Whether the record's latest version is the workflow ``data`` holds.
+
+    Cloud answers a file write 200 even when its copy into the record of the
+    file's name fails, and the editor refuses a ``workflowId`` link whose record
+    differs from the file. A failed or odd read answers False.
+    """
+    import urllib.parse
+
+    try:
+        _, content = _http_request(target.url("workflows", urllib.parse.quote(workflow_id, safe=""), "content"), target)
+        return isinstance(content, dict) and content.get("workflow_json") == json.loads(data)
+    except (*_request_errors(), RecursionError):
+        return False
+
+
 def _cloud_link_id(value: Any) -> str | None:
     return value if isinstance(value, str) and _LINK_ID_PATTERN.fullmatch(value) else None
 
@@ -1683,6 +1709,7 @@ def _cloud_folder_save(
 
     base = _cloud_folder_name(name)
     file_name = f"{base}.json"
+    data = text.encode("utf-8")
     saved = None
     for attempt in range(1, _MAX_FOLDER_TRIES + 1):
         folder = base if attempt == 1 else f"{base} ({attempt})"
@@ -1696,7 +1723,7 @@ def _cloud_folder_save(
                 _userdata_file_url(target, key, query={"overwrite": "false"}),
                 target,
                 method="POST",
-                data=text.encode("utf-8"),
+                data=data,
                 content_type="application/json",
                 headers=headers,
             )
@@ -1719,6 +1746,175 @@ def _cloud_folder_save(
         raise typer.Exit(code=1)
 
     folder, key, raw = saved
+    _emit_cloud_sidebar_save(
+        renderer,
+        target,
+        path=path,
+        folder=folder,
+        key=key,
+        raw=raw,
+        data=data,
+        replaced=False,
+        description=description,
+        deployment=deployment,
+        workflow_links=workflow_links,
+    )
+
+
+def _cloud_replace_key(renderer, filename: str) -> str:
+    """The key under ``workflows/`` that ``--replace`` names: ``<folder>/<name>.json``.
+
+    Takes the ``data.filename`` an earlier sidebar save returned, with or
+    without its leading ``workflows/``. Refused as
+    ``_reject_unsafe_workflow_key`` refuses a local id (traversal, absolute or
+    home paths, backslashes, empty or dot-only segments), and also unless it
+    is one folder deep and ends in ``.json``: the shape a sidebar save writes.
+    """
+    stripped = filename.strip()
+    # Only `workflows/<folder>/<name>.json` carries the optional prefix; a
+    # two-part value is already the key, even when its folder is `workflows`.
+    prefixed = stripped.count("/") == 2 and stripped.startswith(f"{_WORKFLOWS_DIR}/")
+    key = stripped[len(_WORKFLOWS_DIR) + 1 :] if prefixed else stripped
+    parts = key.split("/")
+    if (
+        not key
+        or key.startswith("/")
+        or key.startswith("~")
+        or "\\" in key
+        # Catches "" (leading/trailing/double slash), ".", "..", "...", ".. ", etc.
+        or any(p.rstrip(" .") in ("", "..") for p in parts)
+        or len(parts) != 2
+        or not key.endswith(".json")
+        or parts[1] == ".json"
+    ):
+        renderer.error(
+            code="invalid_argument",
+            message=f"--replace {filename!r} is not a Cloud Workflows-sidebar file a save returned",
+            hint="pass the `data.filename` an earlier `comfy workflow save --where cloud` returned: "
+            "`workflows/<folder>/<name>.json` (no `..`, no leading `/`)",
+            details={"filename": filename},
+        )
+        raise typer.Exit(code=1)
+    return key
+
+
+def _cloud_replace_save(
+    renderer,
+    target,
+    *,
+    path: Path,
+    text: str,
+    key: str,
+    expected_sha256: str | None,
+    name_ignored: bool,
+    description: str | None,
+    deployment: str | None,
+    workflow_links: bool,
+    headers: dict[str, str] | None = None,
+) -> None:
+    """Write the workflow over the sidebar file ``workflows/<key>`` that ``--replace`` names.
+
+    Only a file that exists is written: a 404 on the read stops the save
+    before the ``overwrite=true`` write could make a new file. With
+    ``expected_sha256`` the file's current bytes must hash to it, so an edit
+    made in the browser since the caller's save is not overwritten. Cloud's
+    file POST takes no condition, so an edit that lands between the read and
+    the write is still lost. Cloud adds a version to the record of the file's
+    name, so its ``workflow_id`` normally stays the same.
+    """
+    import hashlib
+    import urllib.error
+
+    filename = f"{_WORKFLOWS_DIR}/{key}"
+    try:
+        _, current = _userdata_request(_userdata_file_url(target, key), target)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            renderer.error(
+                code="workflow_replace_missing",
+                message=f"the Cloud Workflows sidebar has no file {filename!r} to replace; nothing was saved",
+                hint="save without `--replace` to make a new sidebar folder; nothing was written",
+                details={"filename": filename},
+            )
+            raise typer.Exit(code=1) from e
+        raise _handle_cloud_http_error(renderer, e, operation="save") from e
+    except _request_errors() as e:
+        raise _handle_cloud_http_error(renderer, e, operation="save") from e
+
+    current_sha256 = hashlib.sha256(current).hexdigest()
+    if expected_sha256 is not None and current_sha256 != expected_sha256:
+        renderer.error(
+            code="workflow_replace_changed",
+            message=f"the Cloud Workflows sidebar file {filename!r} is not the one --expected-sha256 names: it "
+            "was edited on Cloud since it was saved; nothing was saved",
+            hint="the file was edited on Cloud since it was saved: ask the person, then retry without "
+            "`--expected-sha256` to replace it anyway, or save a new copy without `--replace`",
+            details={"filename": filename, "current_sha256": current_sha256, "expected_sha256": expected_sha256},
+        )
+        raise typer.Exit(code=1)
+
+    data = text.encode("utf-8")
+    try:
+        _, raw = _userdata_request(
+            _userdata_file_url(target, key, query={"overwrite": "true"}),
+            target,
+            method="POST",
+            data=data,
+            content_type="application/json",
+            headers=headers,
+        )
+    except _request_errors() as e:
+        raise _handle_cloud_http_error(renderer, e, operation="save") from e
+
+    warnings: list[dict[str, str]] = []
+    if name_ignored:
+        warnings.append(
+            {
+                "code": "name_ignored",
+                "message": f"--name is ignored with --replace: the file keeps its folder and name ({filename})",
+            }
+        )
+    _emit_cloud_sidebar_save(
+        renderer,
+        target,
+        path=path,
+        folder=key.split("/", 1)[0],
+        key=key,
+        raw=raw,
+        data=data,
+        replaced=True,
+        description=description,
+        deployment=deployment,
+        workflow_links=workflow_links,
+        warnings=warnings,
+    )
+
+
+def _emit_cloud_sidebar_save(
+    renderer,
+    target,
+    *,
+    path: Path,
+    folder: str,
+    key: str,
+    raw: bytes,
+    data: bytes,
+    replaced: bool,
+    description: str | None,
+    deployment: str | None,
+    workflow_links: bool,
+    warnings: list[dict[str, str]] | None = None,
+) -> None:
+    """Report a sidebar file a save just wrote: find its record, build its link, emit the envelope.
+
+    Shared by the new-folder save and ``--replace``. ``key`` is the file's
+    path under ``workflows/``, ``raw`` Cloud's reply to the write and ``data``
+    the bytes written; their sha256 goes out as ``data.sha256`` so a later
+    ``--replace --expected-sha256`` can name them. ``warnings`` lead the
+    envelope's own.
+    """
+    import hashlib
+
     info = None
     try:
         info = json.loads(raw)
@@ -1730,6 +1926,11 @@ def _cloud_folder_save(
     latest_version = record.get("latest_version") if record else None
     workspace_id = _cloud_workspace_id(target)
     link_workflow_id = workflow_id if workflow_links else None
+    # A replace adds a version to a record that already exists, and Cloud's copy
+    # into it can fail behind a 200: link the record only once it shows the bytes.
+    record_stale = bool(replaced and link_workflow_id and not _cloud_record_holds(target, link_workflow_id, data))
+    if record_stale:
+        link_workflow_id = None
     url = _cloud_save_link(
         target,
         workspace_id=workspace_id,
@@ -1740,7 +1941,10 @@ def _cloud_folder_save(
     url_opens = None if url is None else ("workflow" if link_workflow_id else "folder")
     folder_link_reason = None
     if url_opens == "folder":
-        folder_link_reason = record_unknown if workflow_links else "workflow_links_off"
+        if record_stale:
+            folder_link_reason = "record_stale"
+        else:
+            folder_link_reason = record_unknown if workflow_links else "workflow_links_off"
     # ``workflow_id``, ``name``, ``latest_version`` and ``source`` keep their
     # record-save meaning: the id is the record Cloud mirrored the file into,
     # which `workflow get` and `workflow delete` take.
@@ -1750,6 +1954,8 @@ def _cloud_folder_save(
         "latest_version": latest_version,
         "filename": f"{_WORKFLOWS_DIR}/{key}",
         "folder": folder,
+        "replaced": replaced,
+        "sha256": hashlib.sha256(data).hexdigest(),
         "url": url,
         "url_opens": url_opens,
         "folder_link_reason": folder_link_reason,
@@ -1759,7 +1965,7 @@ def _cloud_folder_save(
         "size": info.get("size") if isinstance(info, dict) else None,
         "modified": info.get("modified") if isinstance(info, dict) else None,
     }
-    warnings: list[dict[str, str]] = []
+    warnings = list(warnings or [])
     if description:
         warnings.append(
             {
@@ -1776,6 +1982,14 @@ def _cloud_folder_save(
                 "in the browser's current workspace",
             }
         )
+    if record_stale:
+        warnings.append(
+            {
+                "code": "workflow_record_stale",
+                "message": "the file is replaced, but Cloud's workflow record of its name does not show the new "
+                "content, so the link opens the folder",
+            }
+        )
     if workflow_id is None:
         why = _RECORD_UNKNOWN_CLAUSES[record_unknown]
         warnings.append(
@@ -1790,8 +2004,12 @@ def _cloud_folder_save(
         payload["warnings"] = warnings
     if renderer.is_pretty():
         rprint(
-            f"[green]✓[/green] saved to the Cloud Workflows sidebar as "
-            f"[bold]{sanitize_markup(payload['filename'])}[/bold]"
+            (
+                "[green]✓[/green] replaced in the Cloud Workflows sidebar: "
+                if replaced
+                else "[green]✓[/green] saved to the Cloud Workflows sidebar as "
+            )
+            + f"[bold]{sanitize_markup(payload['filename'])}[/bold]"
             + (f" → [dim]{sanitize_markup(workflow_id)}[/dim]" if workflow_id else "")
         )
         if url is not None:
@@ -2090,17 +2308,40 @@ def get_cmd(
     "save",
     help="Save a workflow JSON to the saved-workflow store (cloud, or local ComfyUI /userdata with --where local). "
     "On a cloud workspace with `cli_cloud_save_enabled` on, it goes into a new Workflows-sidebar folder and the "
-    "command prints a link that opens it.",
+    "command prints a link that opens it; `--replace <data.filename>` updates the file an earlier save made "
+    "instead (`--expected-sha256 <data.sha256>` refuses if it was edited on Cloud since).",
 )
 @tracking.track_command("workflow")
 def save_cmd(
     workflow_file: Annotated[str, typer.Argument(help="Path to a workflow JSON file.")],
     name: Annotated[
-        str,
+        str | None,
         typer.Option(
-            "--name", help="Cloud: display name. Local: filename under workflows/ ('.json' appended if absent)."
+            "--name",
+            show_default=False,
+            help="Cloud: display name. Local: filename under workflows/ ('.json' appended if absent). "
+            "Required unless --replace is given.",
         ),
-    ],
+    ] = None,
+    replace: Annotated[
+        str | None,
+        typer.Option(
+            "--replace",
+            show_default=False,
+            help="Cloud sidebar save only: overwrite the existing Workflows-sidebar file an earlier save returned "
+            "as `data.filename` (`workflows/<folder>/<name>.json`; the `workflows/` prefix is optional) instead of "
+            "making a new folder. The file keeps its folder and name. Nothing is written if it does not exist.",
+        ),
+    ] = None,
+    expected_sha256: Annotated[
+        str | None,
+        typer.Option(
+            "--expected-sha256",
+            show_default=False,
+            help="With --replace: the `data.sha256` the earlier save returned. If the file's bytes on Cloud hash "
+            "differently (it was edited there since), nothing is written.",
+        ),
+    ] = None,
     description: Annotated[
         str | None,
         typer.Option("--description", show_default=False, help="Optional description (cloud only; ignored on local)."),
@@ -2119,8 +2360,39 @@ def save_cmd(
     import urllib.error
 
     renderer = get_renderer()
+    if name is None and replace is None:
+        renderer.error(
+            code="invalid_argument",
+            message="--name is required, unless --replace names a Cloud Workflows-sidebar file to update",
+            hint="pass `--name <name>`, or on Cloud `--replace <data.filename>` from an earlier sidebar save",
+        )
+        raise typer.Exit(code=1)
+    if expected_sha256 is not None:
+        if replace is None:
+            renderer.error(
+                code="invalid_argument",
+                message="--expected-sha256 works only with --replace",
+                hint="pass `--replace <data.filename>` too, or drop `--expected-sha256`",
+            )
+            raise typer.Exit(code=1)
+        if not _SHA256_PATTERN.fullmatch(expected_sha256):
+            renderer.error(
+                code="invalid_argument",
+                message=f"--expected-sha256 {expected_sha256!r} is not a sha256 hex digest",
+                hint="pass the 64-character `data.sha256` an earlier sidebar save returned",
+            )
+            raise typer.Exit(code=1)
+        expected_sha256 = expected_sha256.lower()
     target = _resolve_where_target(where)
     if not target.is_cloud:
+        if replace is not None:
+            renderer.error(
+                code="invalid_argument",
+                message="--replace works only with --where cloud",
+                hint="drop `--replace`: a local save with the same `--name` already overwrites that file",
+            )
+            raise typer.Exit(code=1)
+        assert name is not None  # neither --name nor --replace was refused above
         return _local_save(renderer, target, workflow_file, name, description)
     if deployment is not None and _cloud_link_id(deployment) is None:
         renderer.error(
@@ -2129,6 +2401,7 @@ def save_cmd(
             hint="pass the deployment's id (letters, digits, `-` and `_`), or `standard` for Comfy Cloud itself",
         )
         raise typer.Exit(code=1)
+    replace_key = _cloud_replace_key(renderer, replace) if replace is not None else None
 
     path = Path(workflow_file).expanduser()
     if not path.is_file():
@@ -2165,7 +2438,47 @@ def save_cmd(
     # the record-only save with a warning that says why it has no link.
     features = _cloud_save_features(target)
     sidebar = features.get(_CLI_CLOUD_SAVE_FLAG) is True
-    if sidebar and _is_frontend_format(workflow_json):
+    frontend = _is_frontend_format(workflow_json)
+    workflow_links = features.get(_WORKFLOW_LINKS_FLAG) is True
+    if replace_key is not None:
+        # ``--replace`` writes a sidebar file, so it needs the sidebar save and
+        # an editor-format workflow; it never falls back to a record save.
+        filename = f"{_WORKFLOWS_DIR}/{replace_key}"
+        if not sidebar:
+            renderer.error(
+                code="workflow_replace_unsupported",
+                message="--replace updates a Cloud Workflows-sidebar file, but this workspace saves workflow "
+                "records instead (Cloud's `cli_cloud_save_enabled` is not on, or `/api/features` could not be "
+                "read); nothing was saved",
+                hint="save without `--replace` to make a new workflow record",
+                details={"filename": filename, "reason": "sidebar_save_off"},
+            )
+            raise typer.Exit(code=1)
+        if not frontend:
+            renderer.error(
+                code="workflow_replace_unsupported",
+                message=f"--replace writes a Cloud Workflows-sidebar file, which must be an editor-format workflow, "
+                f"and {path} is API format; nothing was saved",
+                hint="save the editor format (ComfyUI `File > Save`) and replace with that, or save without "
+                "`--replace`",
+                details={"filename": filename, "reason": "api_format"},
+            )
+            raise typer.Exit(code=1)
+        return _cloud_replace_save(
+            renderer,
+            target,
+            path=path,
+            text=text,
+            key=replace_key,
+            expected_sha256=expected_sha256,
+            name_ignored=name is not None,
+            description=description,
+            deployment=deployment,
+            workflow_links=workflow_links,
+            headers=headers,
+        )
+    assert name is not None  # neither --name nor --replace was refused above
+    if sidebar and frontend:
         return _cloud_folder_save(
             renderer,
             target,
@@ -2174,7 +2487,7 @@ def save_cmd(
             name=name,
             description=description,
             deployment=deployment,
-            workflow_links=features.get(_WORKFLOW_LINKS_FLAG) is True,
+            workflow_links=workflow_links,
             headers=headers,
         )
 

@@ -1872,6 +1872,23 @@ class Graph:
             return None
         return self._nodes.get(name)
 
+    def admit_combo_value(self, class_type: str, input_name: str, value: Any) -> bool:
+        """Accept ``value`` as one more option of a COMBO input, in this Graph only.
+
+        For a value the target runs although its catalog does not list it:
+        Comfy Cloud's ``object_info`` lists Cloud's own models, never the ones a
+        workspace uploaded (see :mod:`comfy_cli.cloud_own_models`). Returns
+        whether the input exists and is a COMBO.
+        """
+        m = self.node(class_type)
+        port = next((p for p in m.inputs if p.name == input_name), None) if m is not None else None
+        if port is None or port.type != "COMBO":
+            return False
+        if value not in port.enum_values:
+            # A new list: the old one can be the catalog payload's own.
+            port.enum_values = [*port.enum_values, value]
+        return True
+
     def all_nodes(self) -> list[Morphism]:
         return sorted(self._nodes.values(), key=lambda m: m.id)
 
