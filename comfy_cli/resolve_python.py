@@ -21,6 +21,38 @@ def _is_externally_managed() -> bool:
     return bool(stdlib) and os.path.isfile(os.path.join(stdlib, "EXTERNALLY-MANAGED"))
 
 
+def _find_portable_python(workspace_path: str) -> str | None:
+    """Return the official Windows portable build's interpreter, if workspace_path is one.
+
+    The portable archive ships its own interpreter in a ``python_embeded``
+    directory. That directory is a sibling of the ``ComfyUI`` workspace (the
+    layout ``comfy install`` records in config), but is also a child of the
+    workspace when the workspace is the portable root itself. Both are probed.
+
+    The embedded interpreter is a plain ``python.exe`` directly inside the
+    directory, not a venv, so ``_get_python_binary`` does not apply here.
+
+    The path is normalised first: ``os.path.dirname`` strips a trailing
+    separator, so without it ``<root>/ComfyUI/`` would report *itself* as its
+    own parent and the sibling probe below would be skipped.
+
+    Returns ``None`` when the layout is absent, so callers fall back to their
+    existing resolution order unchanged.
+    """
+    workspace_root = os.path.normpath(workspace_path)
+    bases = [workspace_root]
+    parent = os.path.dirname(workspace_root)
+    if parent and parent != workspace_root:
+        bases.append(parent)
+
+    for base in bases:
+        python = os.path.join(base, "python_embeded", "python.exe")
+        if os.path.isfile(python):
+            return python
+
+    return None
+
+
 def resolve_workspace_python(workspace_path: str | None = None) -> str:
     if virtual_env := os.environ.get("VIRTUAL_ENV"):
         python = _get_python_binary(virtual_env)
@@ -33,6 +65,11 @@ def resolve_workspace_python(workspace_path: str | None = None) -> str:
             return python
 
     if workspace_path is not None:
+        # A portable workspace carries its own interpreter; prefer it over any
+        # venv/virtualenv so workspace operations run in ComfyUI's environment.
+        if portable := _find_portable_python(workspace_path):
+            return portable
+
         for venv_name in (".venv", "venv"):
             venv_dir = os.path.join(workspace_path, venv_name)
             if os.path.isdir(venv_dir):
@@ -56,6 +93,12 @@ def create_workspace_venv(workspace_path: str) -> str:
 def ensure_workspace_python(workspace_path: str) -> str:
     if os.environ.get("VIRTUAL_ENV") or os.environ.get("CONDA_PREFIX"):
         return resolve_workspace_python(workspace_path)
+
+    # Portable workspaces already have an interpreter with ComfyUI's
+    # dependencies; never create a venv beside it or fall through to the
+    # system Python comfy-cli itself runs on.
+    if portable := _find_portable_python(workspace_path):
+        return portable
 
     for venv_name in (".venv", "venv"):
         venv_dir = os.path.join(workspace_path, venv_name)
