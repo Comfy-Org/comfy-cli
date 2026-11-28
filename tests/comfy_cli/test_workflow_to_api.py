@@ -3448,3 +3448,122 @@ class TestSocketlessInputAbsentFromASavedWorkflow:
 
     def test_a_saved_value_still_wins_over_the_placeholder(self, object_info_compare):
         assert self._one("ColorNode", ["#123456"], object_info_compare)["color"] == "#123456"
+
+
+class TestShortOnlyByTrailingOptionals:
+    """A `widgets_values` array short only by trailing optional widgets agrees
+    with the schema's positional order: the missing trailing widgets take their
+    defaults, as the frontend fills them (issue #1152).
+
+    When a ComfyUI update appends a widget at the end of a node (TextGenerate's
+    `mtp`), the shortness used to disqualify the correctly aligned walk, and a
+    save that ALSO promotes a dynamic-combo sub-input (a partial sub-order)
+    then stranded on that partial order — shifting every value after the combo
+    with no error raised.
+    """
+
+    @staticmethod
+    def _schema(extra_trailing_widget):
+        sampling = [
+            "COMFY_DYNAMICCOMBO_V3",
+            {
+                "options": [
+                    {
+                        "key": "on",
+                        "inputs": {
+                            "required": {
+                                "temperature": ["FLOAT", {"default": 0.7}],
+                                "top_p": ["FLOAT", {"default": 0.95}],
+                                "seed": ["INT", {"default": 0}],
+                            }
+                        },
+                    },
+                    {"key": "off", "inputs": {"required": {}}},
+                ]
+            },
+        ]
+        optional = {"thinking": ["BOOLEAN", {"default": False}], "mode": [["auto", "off"], {"default": "auto"}]}
+        order = ["thinking", "mode"]
+        if extra_trailing_widget:
+            optional["extra"] = [["env", "off", "on"], {"default": "env"}]
+            order.append("extra")
+        return {
+            "Gen": {
+                "input": {"required": {"prompt": ["STRING", {}], "sampling_mode": sampling}, "optional": optional},
+                "input_order": {"required": ["prompt", "sampling_mode"], "optional": order},
+                "output": ["STRING"],
+                "output_name": ["text"],
+                "name": "Gen",
+                "output_node": True,
+            }
+        }
+
+    @staticmethod
+    def _workflow(promoted_sub_input=True):
+        inputs = []
+        if promoted_sub_input:
+            # the save promotes one sub-input, so node.inputs records a
+            # partial sub-input order
+            inputs = [
+                {"name": "sampling_mode.seed", "type": "INT", "widget": {"name": "sampling_mode.seed"}, "link": None}
+            ]
+        return {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "Gen",
+                    "mode": 0,
+                    "inputs": inputs,
+                    "outputs": [{"name": "text", "type": "STRING", "links": []}],
+                    "widgets_values": ["hello", "on", 0.3, 0.8, 42, True, "off"],
+                }
+            ],
+            "links": [],
+        }
+
+    @staticmethod
+    def _convert(workflow, schema):
+        return convert_ui_to_api(json.loads(json.dumps(workflow)), schema)["1"]["inputs"]
+
+    def test_both_causes_keep_the_saved_values_and_default_the_new_widget(self):
+        inputs = self._convert(self._workflow(), self._schema(extra_trailing_widget=True))
+        assert inputs == {
+            "prompt": "hello",
+            "sampling_mode": "on",
+            "sampling_mode.temperature": 0.3,
+            "sampling_mode.top_p": 0.8,
+            "sampling_mode.seed": 42,
+            "thinking": True,
+            "mode": "off",
+            "extra": "env",
+        }
+
+    def test_a_save_matching_the_schema_is_unchanged(self):
+        inputs = self._convert(self._workflow(), self._schema(extra_trailing_widget=False))
+        assert inputs["sampling_mode.seed"] == 42
+        assert inputs["thinking"] is True
+        assert inputs["mode"] == "off"
+
+    def test_a_trailing_optional_without_a_promoted_sub_input_defaults(self):
+        inputs = self._convert(self._workflow(promoted_sub_input=False), self._schema(extra_trailing_widget=True))
+        assert inputs["extra"] == "env"
+        assert inputs["sampling_mode.seed"] == 42
+
+    def test_a_widget_the_markers_prove_absent_is_still_omitted(self):
+        """The padding follows the saved-node evidence: a complete marker
+        inventory that does not name the trailing widget keeps the
+        TestAbsentOptionalWidgetsAreNotSynthesized contract — omitted, not
+        defaulted — while every saved value still lands on the right input.
+        (With a promoted sub-input the markers cannot cover the sub-values
+        the array filled, so no inventory is provable there and the default
+        stands; without one the inventory is decidable.)"""
+        workflow = self._workflow(promoted_sub_input=False)
+        workflow["nodes"][0]["inputs"] = [
+            {"name": n, "type": t, "widget": {"name": n}, "link": None}
+            for n, t in (("prompt", "STRING"), ("sampling_mode", "COMBO"), ("thinking", "BOOLEAN"), ("mode", "COMBO"))
+        ]
+        inputs = self._convert(workflow, self._schema(extra_trailing_widget=True))
+        assert "extra" not in inputs
+        assert inputs["sampling_mode.seed"] == 42
+        assert inputs["thinking"] is True
+        assert inputs["mode"] == "off"
