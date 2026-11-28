@@ -110,7 +110,7 @@
           }
         }
       ],
-      "description": "The update the cancel ended: the deployment's pendingUpdate as read just before its copy was stopped. Null where nothing waited, or the update landed first, and nothing changed."
+      "description": "The update the cancel ended: the deployment's pendingUpdate as read just before its copy was stopped. Null where nothing waited, or the update was gone before its copy was stopped (it landed, or an earlier cancel ended it), and nothing changed."
     }
   }
 }

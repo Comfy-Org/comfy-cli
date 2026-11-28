@@ -153,6 +153,34 @@ def test_a_cancel_the_landing_beat_says_the_update_already_landed(monkeypatch, o
     jsonschema.Draft202012Validator(_schema()).validate(data)
 
 
+class _CancelledFirst(FakeDeploy):
+    def stop_kept_release(self, deployment_id: str, release_id: str) -> JsonObject:
+        self.rows[deployment_id]["pendingUpdate"] = None
+        return super().stop_kept_release(deployment_id, release_id)
+
+
+@pytest.mark.parametrize("output", ["--json", "--no-json"])
+def test_a_cancel_an_earlier_cancellation_beat_does_not_say_the_move_landed(monkeypatch, output: str) -> None:
+    client = _CancelledFirst(list(_waiting(kind="compute", release_id="release-4").rows.values()))
+    client.rows["dep-prod"]["pendingUpdate"]["status"] = "failed"
+
+    result = _invoke(monkeypatch, client, "--deployment", "dep-prod", output=output)
+
+    assert result.exit_code == 0, result.stderr
+    assert client.stop_release_calls == [("dep-prod", "release-4")]
+    if output == "--no-json":
+        assert "landed" not in result.stdout
+        assert "The update to release v4 is no longer waiting; dep-prod serves release v4." in result.stdout
+        return
+    envelope = _envelope(result)
+    assert envelope["changed"] is False
+    data = envelope["data"]
+    assert data["cancelledUpdate"] is None
+    assert data["release"] == {"id": "release-4", "version": 4}
+    assert data["deployment"]["revision"] == 3
+    jsonschema.Draft202012Validator(_schema()).validate(data)
+
+
 class _SlowStop(FakeDeploy):
     reads = 2
 

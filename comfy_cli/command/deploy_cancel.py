@@ -83,6 +83,7 @@ class CancelResult:
     # The update the cancel ended, or None where nothing waited.
     cancelled: JsonObject | None
     landed: JsonObject | None = None
+    gone: JsonObject | None = None
 
     def payload(self) -> JsonObject:
         deployment: JsonObject = {
@@ -160,7 +161,10 @@ def cancel(builder: BuilderReleaseClient, client: DeploymentCancelClient, reques
             raise
         deployment = client.get_deployment(deployment_id)
         serving = _release(builder, releases, required_string(deployment, "releaseId"))
-        return CancelResult(deployment, serving, None, landed=update)
+        revision = optional_revision(deployment)
+        if revision is not None and revision > update["baseRevision"]:
+            return CancelResult(deployment, serving, None, landed=update)
+        return CancelResult(deployment, serving, None, gone=update)
     deployment = poll_deployment(client, deployment_id, _sleep, settled=_ended(pending), limit=CANCEL_WATCH_SECONDS)
     return CancelResult(deployment, _release(builder, releases, required_string(deployment, "releaseId")), update)
 
@@ -171,6 +175,9 @@ def _cancel_text(result: CancelResult) -> str:
     if result.landed is not None:
         target = release_label(result.landed["release"])
         return f"The {result.landed['kind']} to {target} already landed; {label} serves {serving}."
+    if result.gone is not None:
+        target = release_label(result.gone["release"])
+        return f"The {result.gone['kind']} to {target} is no longer waiting; {label} serves {serving}."
     if result.cancelled is None:
         return f"Deployment {label} has no update waiting; it serves {serving}."
     noun = result.cancelled["kind"]

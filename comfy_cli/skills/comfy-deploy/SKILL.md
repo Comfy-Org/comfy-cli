@@ -319,13 +319,15 @@ comfy deploy cancel [PATH] [--deployment <name|id>]
   that update moved to, its `baseRevision` and `kind`, as the deployment's
   `pendingUpdate` read just before the stop named it.
 - **Nothing waiting is not an error:** it exits 0 with `changed: false` and
-  `cancelledUpdate: null`, as a second cancel does. An update that landed
-  before the stop reached the service answers the same way, and says it
-  landed.
+  `cancelledUpdate: null`, as a second cancel does. An update that was gone
+  before the stop reached the service answers the same way: it says the update
+  landed where the deployment's `revision` moved past the update's
+  `baseRevision`, and otherwise that the update is no longer waiting.
 - **An unfinished cancellation still waits:** a `pendingUpdate` whose
   `status` reads `failed` is one an earlier cancel stopped, and running cancel
-  again stops it again. A cancel whose update has not ended after ten minutes
-  exits 75 with `deploy_watch_lost`.
+  again stops it again. Cancel waits for the update to end, not for its copy
+  to finish stopping; one whose update has not ended after ten minutes exits
+  75 with `deploy_watch_lost`.
 - **It picks the deployment as `rollback` does.**
 - **A cancelled move back to a kept release stops that release's copy:**
   cancel ends the move by stopping the copy it waits on, as the platform

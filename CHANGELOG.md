@@ -33,9 +33,10 @@ history.
   every cancel answered `deploy_updates_unavailable`. It now stops the copy the
   deployment's `pendingUpdate` names, as the platform site does, and reads the
   deployment until that update is gone; rollbacks and GPU/region moves cancel
-  the same way. An update that landed first exits 0 with `changed: false`, and
-  one whose stop has not finished after ten minutes exits 75 with
-  `deploy_watch_lost`.
+  the same way. An update that landed first, or that an earlier cancel already
+  ended, exits 0 with `changed: false`. Cancel waits up to ten minutes for the
+  waiting update to end, not for its copy to finish stopping; an update still
+  waiting after that exits 75 with `deploy_watch_lost`.
 
 - Telemetry no longer loses the last event of a run when `posthog` resolves to
   7.38.1 or newer. The CLI drops PostHog's own exit hook so its own 5-second,
