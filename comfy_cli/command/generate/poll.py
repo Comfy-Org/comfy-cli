@@ -24,6 +24,7 @@ from typing import Any
 import httpx
 
 from comfy_cli.command.generate import client
+from comfy_cli.http import assert_safe_url
 
 
 @dataclass
@@ -141,6 +142,14 @@ def poll_bfl(
     url = initial.get("polling_url")
     if not url:
         raise client.ApiError(0, "", "BFL response missing polling_url")
+    try:
+        assert_safe_url(url)
+    except ValueError as e:
+        # client.get attaches the API key to every poll; a plain-http
+        # polling_url would ship it in cleartext to whatever host the
+        # response named. BFL serves https polling URLs; a loopback URL
+        # stays allowed so a local partner stub keeps working.
+        raise client.ApiError(0, "", str(e)) from e
     deadline = _now() + timeout
     last_body: dict[str, Any] = {}
     while _now() < deadline:
