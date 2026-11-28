@@ -371,23 +371,20 @@ def _resolve_civitai_source(fetch, url: str):
     return resolved
 
 
-# Hugging Face's own hosts. `hf.co` is HF's documented short domain and redirects
-# to `huggingface.co`; `huggingface.com` was already accepted here. Matched on
-# `hostname` rather than `netloc` on purpose: `netloc` keeps the port and any
-# userinfo and is not lowercased, so `huggingface.co:443`, `HuggingFace.co` and
+# Hugging Face's own hosts, each registrable domain plus its `www.` spelling.
+# `hf.co` is HF's documented short domain and redirects to `huggingface.co`;
+# `huggingface.com` was already accepted here. Matched on `hostname` rather than
+# `netloc` on purpose: `netloc` keeps the port and any userinfo and is not
+# lowercased, so `huggingface.co:443`, `HuggingFace.co` and
 # `user@huggingface.co` all compare unequal to the literal while naming the same
 # host. One set, read by both recognizers, so "on Hugging Face" cannot mean two
 # different things two lines apart.
-HUGGINGFACE_HOSTS = frozenset(
-    {
-        "huggingface.co",
-        "www.huggingface.co",
-        "huggingface.com",
-        "www.huggingface.com",
-        "hf.co",
-        "www.hf.co",
-    }
-)
+#
+# DERIVED from `constants.HF_BASE_HOSTS`, not restated: that is the same tuple
+# the bearer-token gate reads, and writing it out twice is what let the
+# recognizer and the token gate disagree about a trailing-dot FQDN. See the
+# comment on `HF_BASE_HOSTS` and `test_hf_host_sets_agree`.
+HUGGINGFACE_HOSTS = frozenset(host for base in constants.HF_BASE_HOSTS for host in (base, f"www.{base}"))
 
 # The path segments after which Hugging Face serves file BYTES rather than a web
 # page: `/<marker>/<branch>/<path>`. `resolve` and `blob` are what
@@ -1179,9 +1176,23 @@ def _hf_headers() -> dict | None:
 
 
 def _host_allowed(url: str, hosts: tuple[str, ...]) -> bool:
-    """True when ``url``'s host is one of ``hosts`` or a subdomain of one."""
+    """True when ``url``'s host is one of ``hosts`` or a subdomain of one.
+
+    The trailing dot is stripped, exactly as :func:`is_huggingface_host` strips
+    it: ``huggingface.co.`` is the fully-qualified spelling of
+    ``huggingface.co`` and resolves to it, so leaving it in made the two
+    predicates disagree about one real URL. The consequence was not a refusal a
+    user could read -- it was a ``--background`` transfer that dropped the
+    ``Authorization`` header the foreground had already established was
+    required, and then failed unauthorized against a repo the token could read.
+
+    Stripping it cannot widen the match to a lookalike domain: the dot is
+    removed from the END of the host, and both tests below it are anchored
+    there (equality, or a ``.<host>`` suffix), so ``huggingface.co.evil.example``
+    is refused before and after.
+    """
     try:
-        host = (urlparse(url).hostname or "").lower()
+        host = (urlparse(url).hostname or "").lower().rstrip(".")
     except ValueError:
         return False
     if not host:
