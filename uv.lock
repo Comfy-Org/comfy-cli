@@ -335,7 +335,7 @@ requires-dist = [
     { name = "mixpanel", specifier = "<5" },
     { name = "packaging" },
     { name = "pathspec" },
-    { name = "posthog", specifier = ">=6,<8" },
+    { name = "posthog", specifier = ">=6,<9" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "psutil", specifier = ">=6" },
     { name = "pytest", marker = "extra == 'dev'" },
