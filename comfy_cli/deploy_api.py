@@ -320,16 +320,15 @@ class DeployClient:
             body["toRevision"] = to_revision
         return self._post("move", ("deployments", deployment_id, "rollback"), body)
 
-    def cancel_pending_update(self, deployment_id: str) -> dict:
-        """End the update the deployment waits on; it keeps serving its release, at the same revision.
+    def stop_kept_release(self, deployment_id: str, release_id: str) -> dict:
+        """PATCH /v1/deployments/{id}/releases/{releaseId}: stop a release's copy the deployment keeps.
 
-        The reply is the deployment, with ``cancelledUpdate`` naming the update
-        it ended. Where nothing waits, the service answers 409
-        NO_PENDING_UPDATE and nothing changes.
+        Stopping the release an update waits on ends that update first, even
+        when it shares the serving release id, and the deployment keeps serving
+        its release. Where the release is the one served and no update waits on
+        it, the service answers 409 CURRENT_RELEASE.
         """
-        return self._request(
-            _Request(operation="cancel", parts=("deployments", deployment_id, "pending-update"), method="DELETE")
-        )
+        return self._patch("cancel", ("deployments", deployment_id, "releases", release_id), {"status": "stopped"})
 
     def get_deployment_revisions(self, deployment_id: str) -> dict:
         """GET /v1/deployments/{id}/revisions: every revision, oldest first."""

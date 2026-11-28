@@ -311,20 +311,35 @@ comfy deploy history [PATH] [--deployment <name|id>]
 comfy deploy cancel [PATH] [--deployment <name|id>]
 ```
 
-- **It ends the update a deployment waits on**, an `up`, `promote` or
-  `rollback` whose release is still coming up, and stops that copy. The
+- **It ends the update a deployment waits on**, an `up`, `promote`,
+  `rollback` or GPU/region move whose copy is still coming up, by stopping
+  that copy, then reads the deployment until the update ends. The
   deployment keeps serving the release it served, at the same revision.
 - **It names what it ended:** `--json` carries `cancelledUpdate`, the release
-  that update moved to, its `baseRevision` and `kind`. That is whichever update
-  waited when the service took the cancel, which can be a newer one than you
-  saw, so read it rather than assuming.
+  that update moved to, its `baseRevision` and `kind`, as the deployment's
+  `pendingUpdate` read just before the stop named it.
 - **Nothing waiting is not an error:** it exits 0 with `changed: false` and
-  `cancelledUpdate: null`, as a second cancel does.
-- **It picks the deployment as `rollback` does.** A deploy service too old for
-  cancel refuses with `deploy_updates_unavailable`; wait for the update to land
-  or fail instead.
-- **A cancelled move back to a kept release leaves that release as it was:**
-  one you stopped stays stopped and yours, and one on its way out still goes.
+  `cancelledUpdate: null`. A stop the service refuses with 409 `CURRENT_RELEASE` answers the same way: it
+  says the update landed where the deployment's `revision` moved past the
+  update's `baseRevision`, and otherwise that the update is no longer waiting.
+  A cancel racing another cancel can still report `changed: true` and name the
+  update: comfy-deploy accepts the stop of a copy the other cancel already
+  stopped.
+- **An unfinished cancellation is stopped again:** a `pendingUpdate` whose
+  `status` reads `failed` is one an earlier cancel stopped, and running cancel
+  again stops it again and reports `changed: true`. A cancel run right after
+  a GPU/region move's cancel finished does this while the move's copy is
+  still stopping. A second cancel answers `changed: false` only once the
+  deployment shows no `pendingUpdate`, or on a 409 `CURRENT_RELEASE`.
+- **Cancel waits for the update to end, not for its copy to finish
+  stopping.** A cancelled GPU/region move keeps its `pendingUpdate`, reading
+  `failed`, until its copy has stopped; once its own stop was taken, cancel
+  reads that `failed` as the end. An update that has not ended after ten
+  minutes exits 75 with `deploy_watch_lost`.
+- **It picks the deployment as `rollback` does.**
+- **A cancelled move back to a kept release stops that release's copy:**
+  cancel ends the move by stopping the copy it waits on, as the platform
+  site's end button does.
 
 ## `comfy deploy models`
 

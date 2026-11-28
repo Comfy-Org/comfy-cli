@@ -129,7 +129,9 @@ class FakeDeploy:
         self.move_calls: list[tuple[str, int, str]] = []
         self.promote_calls: list[tuple[str, int, str]] = []
         self.rollback_calls: list[tuple[str, int, int | None]] = []
-        self.cancel_calls: list[str] = []
+        self.stop_release_calls: list[tuple[str, str]] = []
+        self.copy_stop_reads = 3
+        self._copies_stopping: dict[str, tuple[JsonObject, int]] = {}
         # Each deployment's revisions, oldest first, as the service lists them.
         self.revisions: dict[str, list[JsonObject]] = {}
         # Raised by the next worker-bounds edit, when set.
@@ -242,6 +244,15 @@ class FakeDeploy:
         with self._lock:
             self.get_ids.append(deployment_id)
             row = self.rows[deployment_id]
+            stopping = self._copies_stopping.get(deployment_id)
+            if stopping is not None:
+                stopped, left = stopping
+                if left > 0:
+                    self._copies_stopping[deployment_id] = (stopped, left - 1)
+                else:
+                    del self._copies_stopping[deployment_id]
+                    if row.get("pendingUpdate") == stopped:
+                        row["pendingUpdate"] = None
             if (self.move_calls or self.promote_calls or self.rollback_calls) and self.get_patches:
                 row.update(self.get_patches.pop(0))
             if self.get_statuses:
@@ -318,23 +329,25 @@ class FakeDeploy:
                 reply["pendingUpdate"] = {**moved["pendingUpdate"], "kind": "rollback"}
             return reply
 
-    def cancel_pending_update(self, deployment_id: str) -> JsonObject:
+    def stop_kept_release(self, deployment_id: str, release_id: str) -> JsonObject:
         with self._lock:
-            self.cancel_calls.append(deployment_id)
+            self.stop_release_calls.append((deployment_id, release_id))
             row = self.rows[deployment_id]
             pending = row.get("pendingUpdate")
-            if not isinstance(pending, dict):
+            if isinstance(pending, dict) and pending.get("releaseId") == release_id:
+                if row.get("releaseId") == release_id:
+                    row["pendingUpdate"] = {**pending, "status": "failed"}
+                    self._copies_stopping[deployment_id] = (copy.deepcopy(row["pendingUpdate"]), self.copy_stop_reads)
+                else:
+                    row["pendingUpdate"] = None
+            elif row.get("releaseId") == release_id:
                 raise DeployAPIError(
-                    "deploy_conflict", "no update is waiting", status=409, details={"server_code": "NO_PENDING_UPDATE"}
+                    "deploy_conflict",
+                    "the deployment serves this release; stop or delete the deployment instead",
+                    status=409,
+                    details={"server_code": "CURRENT_RELEASE"},
                 )
-            row["pendingUpdate"] = None
-            reply = copy.deepcopy(row)
-            reply["cancelledUpdate"] = {
-                "releaseId": pending["releaseId"],
-                "baseRevision": pending["baseRevision"],
-                "kind": pending.get("kind", "update"),
-            }
-            return reply
+            return {"releaseId": release_id, "status": "stopping"}
 
     def get_deployment_events(self, deployment_id: str) -> JsonObject:
         return {"deploymentId": deployment_id, "events": []}

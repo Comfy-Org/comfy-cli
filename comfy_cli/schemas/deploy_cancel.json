@@ -110,7 +110,7 @@
           }
         }
       ],
-      "description": "The update the cancel ended: whichever waited when the service took the cancel, which may be a newer one than the caller saw. Null where nothing waited, and nothing changed."
+      "description": "The update the cancel ended: the deployment's pendingUpdate as read just before its copy was stopped. Null where nothing waited at the start, or the service refused the stop with 409 CURRENT_RELEASE because the update had already landed or ended, and nothing changed. A cancel racing another cancel can still name the update here, with changed true."
     }
   }
 }
