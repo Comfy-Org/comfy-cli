@@ -130,6 +130,8 @@ class FakeDeploy:
         self.promote_calls: list[tuple[str, int, str]] = []
         self.rollback_calls: list[tuple[str, int, int | None]] = []
         self.stop_release_calls: list[tuple[str, str]] = []
+        self.copy_stop_reads = 3
+        self._copies_stopping: dict[str, int] = {}
         # Each deployment's revisions, oldest first, as the service lists them.
         self.revisions: dict[str, list[JsonObject]] = {}
         # Raised by the next worker-bounds edit, when set.
@@ -242,6 +244,12 @@ class FakeDeploy:
         with self._lock:
             self.get_ids.append(deployment_id)
             row = self.rows[deployment_id]
+            left = self._copies_stopping.get(deployment_id)
+            if left == 0:
+                del self._copies_stopping[deployment_id]
+                row["pendingUpdate"] = None
+            elif left is not None:
+                self._copies_stopping[deployment_id] = left - 1
             if (self.move_calls or self.promote_calls or self.rollback_calls) and self.get_patches:
                 row.update(self.get_patches.pop(0))
             if self.get_statuses:
@@ -324,7 +332,11 @@ class FakeDeploy:
             row = self.rows[deployment_id]
             pending = row.get("pendingUpdate")
             if isinstance(pending, dict) and pending.get("releaseId") == release_id:
-                row["pendingUpdate"] = None
+                if row.get("releaseId") == release_id:
+                    row["pendingUpdate"] = {**pending, "status": "failed"}
+                    self._copies_stopping[deployment_id] = self.copy_stop_reads
+                else:
+                    row["pendingUpdate"] = None
             elif row.get("releaseId") == release_id:
                 raise DeployAPIError(
                     "deploy_conflict",

@@ -313,7 +313,7 @@ comfy deploy cancel [PATH] [--deployment <name|id>]
 
 - **It ends the update a deployment waits on**, an `up`, `promote`,
   `rollback` or GPU/region move whose copy is still coming up, by stopping
-  that copy, then reads the deployment until the update is gone. The
+  that copy, then reads the deployment until the update ends. The
   deployment keeps serving the release it served, at the same revision.
 - **It names what it ended:** `--json` carries `cancelledUpdate`, the release
   that update moved to, its `baseRevision` and `kind`, as the deployment's
@@ -326,11 +326,14 @@ comfy deploy cancel [PATH] [--deployment <name|id>]
   A cancel racing another cancel can still report `changed: true` and name the
   update: comfy-deploy accepts the stop of a copy the other cancel already
   stopped.
-- **An unfinished cancellation still waits:** a `pendingUpdate` whose
+- **An unfinished cancellation is stopped again:** a `pendingUpdate` whose
   `status` reads `failed` is one an earlier cancel stopped, and running cancel
-  again stops it again. Cancel waits for the update to end, not for its copy
-  to finish stopping; one whose update has not ended after ten minutes exits
-  75 with `deploy_watch_lost`.
+  again stops it again.
+- **Cancel waits for the update to end, not for its copy to finish
+  stopping.** A cancelled GPU/region move keeps its `pendingUpdate`, reading
+  `failed`, until its copy has stopped; once its own stop was taken, cancel
+  reads that `failed` as the end. An update that has not ended after ten
+  minutes exits 75 with `deploy_watch_lost`.
 - **It picks the deployment as `rollback` does.**
 - **A cancelled move back to a kept release stops that release's copy:**
   cancel ends the move by stopping the copy it waits on, as the platform

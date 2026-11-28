@@ -95,7 +95,9 @@ def test_a_gpu_or_region_move_on_the_serving_release_cancels_the_same_way(monkey
 
     assert result.exit_code == 0, result.stderr
     assert client.stop_release_calls == [("dep-prod", "release-4")]
-    data = _envelope(result)["data"]
+    envelope = _envelope(result)
+    assert envelope["changed"] is True
+    data = envelope["data"]
     assert data["cancelledUpdate"] == {
         "release": {"id": "release-4", "version": 4},
         "baseRevision": 3,
@@ -103,6 +105,33 @@ def test_a_gpu_or_region_move_on_the_serving_release_cancels_the_same_way(monkey
     }
     assert data["release"] == {"id": "release-4", "version": 4}
     jsonschema.Draft202012Validator(_schema()).validate(data)
+
+
+def test_a_gpu_or_region_move_cancel_ends_once_its_update_reads_failed(monkeypatch) -> None:
+    client = _waiting(kind="compute", release_id="release-4")
+    monkeypatch.setattr(importlib.import_module("comfy_cli.command.deploy_cancel"), "_sleep", pytest.fail)
+
+    result = _invoke(monkeypatch, client, "--deployment", "dep-prod")
+
+    assert result.exit_code == 0, result.stderr
+    assert client.stop_release_calls == [("dep-prod", "release-4")]
+    assert client.rows["dep-prod"]["pendingUpdate"]["status"] == "failed"
+    envelope = _envelope(result)
+    assert envelope["changed"] is True
+    assert envelope["data"]["cancelledUpdate"]["release"] == {"id": "release-4", "version": 4}
+
+
+def test_a_cancelled_gpu_or_region_move_is_named_a_move(monkeypatch) -> None:
+    client = _waiting(kind="compute", release_id="release-4")
+
+    result = _invoke(monkeypatch, client, "--deployment", "dep-prod", output="--no-json")
+
+    assert result.exit_code == 0, result.stderr
+    assert (
+        "Cancelled the GPU/region move. dep-prod keeps serving release v4 on its current GPU and region."
+        in result.stdout
+    )
+    assert "to release v4" not in result.stdout
 
 
 @pytest.mark.parametrize("output", ["--json", "--no-json"])
@@ -153,6 +182,32 @@ def test_a_cancel_the_landing_beat_says_the_update_already_landed(monkeypatch, o
     jsonschema.Draft202012Validator(_schema()).validate(data)
 
 
+class _MovedFirst(FakeDeploy):
+    def stop_kept_release(self, deployment_id: str, release_id: str) -> JsonObject:
+        self.rows[deployment_id].update({"pendingUpdate": None, "revision": 4})
+        return super().stop_kept_release(deployment_id, release_id)
+
+
+@pytest.mark.parametrize("output", ["--json", "--no-json"])
+def test_a_gpu_or_region_move_that_landed_first_says_the_move_landed(monkeypatch, output: str) -> None:
+    client = _MovedFirst(list(_waiting(kind="compute", release_id="release-4").rows.values()))
+
+    result = _invoke(monkeypatch, client, "--deployment", "dep-prod", output=output)
+
+    assert result.exit_code == 0, result.stderr
+    assert client.stop_release_calls == [("dep-prod", "release-4")]
+    if output == "--no-json":
+        assert "The GPU/region move already landed; dep-prod serves release v4." in result.stdout
+        return
+    envelope = _envelope(result)
+    assert envelope["changed"] is False
+    data = envelope["data"]
+    assert data["cancelledUpdate"] is None
+    assert data["release"] == {"id": "release-4", "version": 4}
+    assert data["deployment"]["revision"] == 4
+    jsonschema.Draft202012Validator(_schema()).validate(data)
+
+
 class _CancelledFirst(FakeDeploy):
     def stop_kept_release(self, deployment_id: str, release_id: str) -> JsonObject:
         self.rows[deployment_id]["pendingUpdate"] = None
@@ -170,7 +225,7 @@ def test_a_cancel_an_earlier_cancellation_beat_does_not_say_the_move_landed(monk
     assert client.stop_release_calls == [("dep-prod", "release-4")]
     if output == "--no-json":
         assert "landed" not in result.stdout
-        assert "The update to release v4 is no longer waiting; dep-prod serves release v4." in result.stdout
+        assert "The GPU/region move is no longer waiting; dep-prod serves release v4." in result.stdout
         return
     envelope = _envelope(result)
     assert envelope["changed"] is False
@@ -187,7 +242,6 @@ class _SlowStop(FakeDeploy):
     def stop_kept_release(self, deployment_id: str, release_id: str) -> JsonObject:
         with self._lock:
             self.stop_release_calls.append((deployment_id, release_id))
-            self.rows[deployment_id]["pendingUpdate"]["status"] = "failed"
             return {"releaseId": release_id, "status": "stopping"}
 
     def get_deployment(self, deployment_id: str) -> JsonObject:
@@ -198,9 +252,8 @@ class _SlowStop(FakeDeploy):
         return super().get_deployment(deployment_id)
 
 
-def test_an_unfinished_cancellation_is_stopped_again_and_waited_on(monkeypatch) -> None:
+def test_an_update_still_waiting_after_the_stop_is_waited_on(monkeypatch) -> None:
     client = _SlowStop(list(_waiting().rows.values()))
-    client.rows["dep-prod"]["pendingUpdate"]["status"] = "failed"
     sleeps: list[float] = []
     monkeypatch.setattr(importlib.import_module("comfy_cli.command.deploy_cancel"), "_sleep", sleeps.append)
 
@@ -212,6 +265,19 @@ def test_an_unfinished_cancellation_is_stopped_again_and_waited_on(monkeypatch) 
     envelope = _envelope(result)
     assert envelope["changed"] is True
     assert envelope["data"]["cancelledUpdate"]["release"] == {"id": "release-5", "version": 5}
+
+
+def test_an_unfinished_cancellation_is_stopped_again_before_it_is_reported(monkeypatch) -> None:
+    client = _waiting(kind="compute", release_id="release-4")
+    client.rows["dep-prod"]["pendingUpdate"]["status"] = "failed"
+
+    result = _invoke(monkeypatch, client, "--deployment", "dep-prod")
+
+    assert result.exit_code == 0, result.stderr
+    assert client.stop_release_calls == [("dep-prod", "release-4")]
+    envelope = _envelope(result)
+    assert envelope["changed"] is True
+    assert envelope["data"]["cancelledUpdate"]["release"] == {"id": "release-4", "version": 4}
 
 
 class _Replaced(FakeDeploy):

@@ -5,7 +5,7 @@ from __future__ import annotations
 import urllib.error
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Final, Protocol, runtime_checkable
+from typing import Final, Literal, Protocol, TypeAlias, runtime_checkable
 
 import typer
 
@@ -45,6 +45,9 @@ from comfy_cli.output import get_renderer
 
 CANCEL_WATCH_SECONDS: Final = 600.0
 _SAME_UPDATE: Final = ("releaseId", "baseRevision", "since", "instanceGroupId")
+_MOVE: Final = "GPU/region move"
+
+Outcome: TypeAlias = Literal["idle", "cancelled", "landed", "gone"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,10 +83,13 @@ class CancelAmbiguousError(ChoiceRefusedError):
 class CancelResult:
     deployment: JsonObject
     release: JsonObject
-    # The update the cancel ended, or None where nothing waited.
-    cancelled: JsonObject | None
-    landed: JsonObject | None = None
-    gone: JsonObject | None = None
+    outcome: Outcome
+    update: JsonObject | None = None
+    move: bool = False
+
+    @property
+    def changed(self) -> bool:
+        return self.outcome == "cancelled"
 
     def payload(self) -> JsonObject:
         deployment: JsonObject = {
@@ -95,7 +101,8 @@ class CancelResult:
             deployment["name"] = name
         if revision is not None:
             deployment["revision"] = revision
-        return {"deployment": deployment, "release": self.release, "cancelledUpdate": self.cancelled}
+        cancelled = self.update if self.changed else None
+        return {"deployment": deployment, "release": self.release, "cancelledUpdate": cancelled}
 
 
 def _picked_deployment(
@@ -142,7 +149,9 @@ def _waiting(deployment: JsonObject) -> JsonObject | None:
 def _ended(pending: JsonObject) -> Callable[[JsonObject], bool]:
     def settled(snapshot: JsonObject) -> bool:
         now = _waiting(snapshot)
-        return now is None or any(now.get(field) != pending.get(field) for field in _SAME_UPDATE)
+        if now is None or now.get("status") == "failed":
+            return True
+        return any(now.get(field) != pending.get(field) for field in _SAME_UPDATE)
 
     return settled
 
@@ -152,36 +161,38 @@ def cancel(builder: BuilderReleaseClient, client: DeploymentCancelClient, reques
     deployment = client.get_deployment(deployment_id)
     pending = _waiting(deployment)
     if pending is None:
-        return CancelResult(deployment, _release(builder, releases, required_string(deployment, "releaseId")), None)
+        return CancelResult(deployment, _release(builder, releases, required_string(deployment, "releaseId")), "idle")
     update = _cancelled(builder, releases, pending)
+    release_id = required_string(pending, "releaseId")
+    move = release_id == deployment.get("releaseId")
     try:
-        client.stop_kept_release(deployment_id, required_string(pending, "releaseId"))
+        client.stop_kept_release(deployment_id, release_id)
     except DeployAPIError as error:
         if error.status != 409 or (error.details or {}).get("server_code") != "CURRENT_RELEASE":
             raise
         deployment = client.get_deployment(deployment_id)
         serving = _release(builder, releases, required_string(deployment, "releaseId"))
         revision = optional_revision(deployment)
-        if revision is not None and revision > update["baseRevision"]:
-            return CancelResult(deployment, serving, None, landed=update)
-        return CancelResult(deployment, serving, None, gone=update)
+        outcome: Outcome = "landed" if revision is not None and revision > update["baseRevision"] else "gone"
+        return CancelResult(deployment, serving, outcome, update, move)
     deployment = poll_deployment(client, deployment_id, _sleep, settled=_ended(pending), limit=CANCEL_WATCH_SECONDS)
-    return CancelResult(deployment, _release(builder, releases, required_string(deployment, "releaseId")), update)
+    serving = _release(builder, releases, required_string(deployment, "releaseId"))
+    return CancelResult(deployment, serving, "cancelled", update, move)
 
 
 def _cancel_text(result: CancelResult) -> str:
     label = deployment_label(result.deployment)
     serving = release_label(result.release)
-    if result.landed is not None:
-        target = release_label(result.landed["release"])
-        return f"The {result.landed['kind']} to {target} already landed; {label} serves {serving}."
-    if result.gone is not None:
-        target = release_label(result.gone["release"])
-        return f"The {result.gone['kind']} to {target} is no longer waiting; {label} serves {serving}."
-    if result.cancelled is None:
+    update = result.update
+    if result.outcome == "idle" or update is None:
         return f"Deployment {label} has no update waiting; it serves {serving}."
-    noun = result.cancelled["kind"]
-    return f"Cancelled the {noun} to {release_label(result.cancelled['release'])}. {label} keeps serving {serving}."
+    what = _MOVE if result.move else f"{update['kind']} to {release_label(update['release'])}"
+    if result.outcome == "landed":
+        return f"The {what} already landed; {label} serves {serving}."
+    if result.outcome == "gone":
+        return f"The {what} is no longer waiting; {label} serves {serving}."
+    where = " on its current GPU and region" if result.move else ""
+    return f"Cancelled the {what}. {label} keeps serving {serving}{where}."
 
 
 def run_cancel(request: CancelRequest) -> None:
@@ -193,7 +204,7 @@ def run_cancel(request: CancelRequest) -> None:
         result = cancel(builder, candidate, request)
         if renderer.is_pretty():
             renderer.success(_cancel_text(result))
-        renderer.emit(result.payload(), command="deploy cancel", changed=result.cancelled is not None)
+        renderer.emit(result.payload(), command="deploy cancel", changed=result.changed)
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
         render_spec_error(renderer, error)
         raise typer.Exit(code=1) from error
