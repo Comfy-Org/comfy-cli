@@ -6,12 +6,14 @@ implicit main-thread loop creation was removed. `background_launch` now uses
 `asyncio.run(...)`, which works identically on 3.10-3.14+.
 """
 
+import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from comfy_cli.caller import Caller
 from comfy_cli.command import launch
+from comfy_cli.workspace_manager import WorkspaceType
 from comfy_cli.output.renderer import (
     OutputMode,
     Renderer,
@@ -167,3 +169,88 @@ def test_background_launch_refuses_when_already_running(mock_config_manager, moc
 
     with pytest.raises(typer.Exit):
         launch.background_launch(extra=[])
+
+
+@patch("comfy_cli.command.launch.os._exit")
+@patch("comfy_cli.command.launch.launch_and_monitor", new_callable=AsyncMock)
+@patch("comfy_cli.command.launch.check_comfy_server_running", return_value=False)
+@patch("comfy_cli.command.launch.ConfigManager")
+def test_background_launch_threads_log_file_to_monitor(
+    mock_config_manager, mock_check_running, mock_monitor, mock_exit
+):
+    """#692: --log-file rides down to the monitor, which truncates and records
+    that path instead of the workspace default."""
+    mock_config_manager.return_value.background = None
+    mock_monitor.return_value = None
+
+    launch.background_launch(extra=[], log_file="/tmp/supervisor/comfy.log")
+
+    assert mock_monitor.call_args[1]["log_file"] == "/tmp/supervisor/comfy.log"
+
+
+def test_background_log_path_override_env_and_default(tmp_path, monkeypatch):
+    """#692: --log-file and COMFY_CLI_BACKGROUND_LOG replace the whole path
+    verbatim; with neither set, the workspace default is unchanged."""
+    monkeypatch.delenv("COMFY_CLI_BACKGROUND_LOG", raising=False)
+    assert launch.background_log_path(8188, str(tmp_path)) == str(tmp_path / "user" / "comfyui_8188.log")
+
+    monkeypatch.setenv("COMFY_CLI_BACKGROUND_LOG", "env-placed.log")
+    assert launch.background_log_path(8188, str(tmp_path)) == os.path.abspath("env-placed.log")
+
+    monkeypatch.delenv("COMFY_CLI_BACKGROUND_LOG")
+    assert launch.background_log_path(8188, str(tmp_path), override="given.log") == os.path.abspath("given.log")
+
+
+@pytest.fixture
+def _launchable_workspace(monkeypatch, tmp_path):
+    """Make launch()'s module-level workspace_manager point at tmp_path."""
+    cfg = {"DEFAULT": {}}
+    ws = patch(
+        "comfy_cli.command.launch.workspace_manager",
+        **{
+            "workspace_path": str(tmp_path),
+            "workspace_type": WorkspaceType.DEFAULT,
+            "config_manager.config": cfg,
+            "set_recent_workspace.return_value": None,
+        },
+    ).start()
+    monkeypatch.setattr(launch, "resolve_workspace_python", lambda _ws: "python")
+    monkeypatch.setattr(launch, "_get_manager_flags", lambda: [])
+    (tmp_path / "user").mkdir(exist_ok=True)  # chdir target for the callers
+    yield tmp_path
+    patch.stopall()
+
+
+def test_launch_anchors_relative_log_file_before_chdir(
+    _launchable_workspace, monkeypatch
+):
+    """A relative --log-file must resolve against the caller's cwd, not the
+    workspace launch() chdirs into (the mirror image of the argv[0] anchor)."""
+    monkeypatch.delenv("COMFY_CLI_BACKGROUND_LOG", raising=False)
+    monkeypatch.chdir(_launchable_workspace / "user")  # start somewhere else
+
+    captured = {}
+    with patch.object(launch, "background_launch", side_effect=lambda *a, **k: captured.update(k)):
+        launch.launch(background=True, log_file="comfy.log")
+
+    assert captured["log_file"] == os.path.abspath(
+        os.path.join(_launchable_workspace / "user", "comfy.log")
+    )
+    # and the process is left in the workspace, as before
+    assert os.path.realpath(os.getcwd()) == os.path.realpath(_launchable_workspace)
+
+
+def test_launch_anchors_relative_background_log_env_before_chdir(
+    _launchable_workspace, monkeypatch
+):
+    """COMFY_CLI_BACKGROUND_LOG anchors the same way: a supervisor that sets a
+    relative path means "next to my own logs", not the workspace."""
+    caller_dir = _launchable_workspace / "user"
+    monkeypatch.chdir(caller_dir)
+    monkeypatch.setenv("COMFY_CLI_BACKGROUND_LOG", "env.log")
+
+    captured = {}
+    with patch.object(launch, "background_launch", side_effect=lambda *a, **k: captured.update(k)):
+        launch.launch(background=True)
+
+    assert captured["log_file"] == os.path.abspath(caller_dir / "env.log")
