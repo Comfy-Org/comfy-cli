@@ -55,6 +55,13 @@ shared subgraph definition. Those are surfaced by :func:`detect_conflict` for th
 merge consumer / ask-to-merge to resolve — the ops still never lose data, and
 ``canonical`` treats the order as immaterial, so the semantic graph converges even
 while the display order does not.
+
+*Within one replay session* autogrow display order is additionally resolved by
+the same total op rank the LWW writes use, ``[base_version, actor, op_id]``, so a
+batch replayed in any order lands on one set of names and positions. That rank
+map is in-process bookkeeping stripped on every write, so it says nothing about
+two grows that arrive in separate invocations, and ``detect_conflict`` still
+surfaces the pair.
 """
 
 from __future__ import annotations
@@ -1005,6 +1012,48 @@ def _next_autogrow_name(ins: list, requested: str, template: dict | None = None)
     base = _autogrow_base(requested)
     n = _first_free_autogrow_index(taken, base, template)
     return f"{base}.{_autogrow_elem_name(base, n, template)}"
+
+
+def _rank_autogrow_group(workflow: dict, dst: dict, base: str, template: dict | None) -> None:
+    """Give replayed grows stable names and positions by their total op rank.
+
+    **Single replay session only.** ``_autogrow_ranks`` is dropped by both
+    ``strip_internal`` and ``canonical``, exactly like ``_widget_stamps``, so a
+    grow applied in a later invocation cannot see an earlier one's rank and the
+    group falls back to arrival order across a write. ``detect_conflict`` is the
+    net for that case and deliberately still returns True for two grows onto one
+    base (`comfy-cli#826` review, finding 2).
+    """
+    ins = dst.get("inputs") or []
+    ranks = workflow.get("_autogrow_ranks") or {}
+    indexed = [
+        (idx, inp)
+        for idx, inp in enumerate(ins)
+        if isinstance(inp, dict)
+        and str(inp.get("grow_id")) in ranks
+        and _autogrow_base(str(inp.get("name", ""))) == base
+    ]
+    if not indexed:
+        return
+
+    ranked = sorted((inp for _, inp in indexed), key=lambda inp: ranks[str(inp["grow_id"])])
+    fixed_names = {inp.get("name") for inp in ins if inp not in ranked}
+    names: list[str] = []
+    n = 0
+    while len(names) < len(ranked):
+        name = f"{base}.{_autogrow_elem_name(base, n, template)}"
+        if name not in fixed_names:
+            names.append(name)
+        n += 1
+    for inp, name in zip(ranked, names, strict=True):
+        inp["name"] = name
+    for (idx, _), inp in zip(indexed, ranked, strict=True):
+        ins[idx] = inp
+
+    slot_by_link = {inp.get("link"): idx for idx, inp in enumerate(ins) if inp.get("link") is not None}
+    for link in workflow.get("links") or []:
+        if len(link) >= 5 and str(link[3]) == str(dst.get("id")) and link[0] in slot_by_link:
+            link[4] = slot_by_link[link[0]]
 
 
 def _autogrow_base(slot_name: str) -> str:
@@ -4084,6 +4133,7 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # attempt's own stamp and is silently dropped forever.
     had_widget_stamps = "_widget_stamps" in workflow
     stamps_before = dict(workflow.get("_widget_stamps") or {})
+    autogrow_ranks_before = dict(workflow.get("_autogrow_ranks") or {})
     pending_was_present = "_pending_dynamic_connects" in workflow
     pending_before = copy.deepcopy(workflow.get("_pending_dynamic_connects"))
     had_deferred_ops = "_deferred_widget_ops" in workflow
@@ -4116,6 +4166,8 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
             workflow["_widget_stamps"] = stamps_before
         else:
             workflow.pop("_widget_stamps", None)
+        if autogrow_ranks_before or "_autogrow_ranks" in workflow:
+            workflow["_autogrow_ranks"] = autogrow_ranks_before
         if pending_was_present:
             workflow["_pending_dynamic_connects"] = pending_before
         else:
@@ -4506,6 +4558,29 @@ def _apply_inputcount_bump(workflow: dict, dst: dict, op: dict, graph, widget: s
 
 
 def _apply_connect(workflow: dict, op: dict, graph) -> None:
+    """Apply a connect, then rank the autogrow group it grew.
+
+    The ranking is here and not at the tail of the body because the body has
+    five normal exits AFTER the slot has been appended — a concurrently deleted
+    source, source-slot drift, a schema-max group, a losing grow-id register and
+    a deferred reconnect with nothing pending. Ranking only on the fully
+    successful tail left every one of those with arrival-order display names
+    (`comfy-cli#826` review, finding 1). Running it out here also means nothing
+    reads ``to_idx`` after the reorder, so there is no stale index to re-derive.
+
+    Deliberately NOT a ``finally``: an exception escaping the body is rolled
+    back by :func:`apply_op`, which restores the bookkeeping keys but not the
+    node's ``inputs``. Reordering a half-applied document on the way out would
+    make that rollback incomplete in a way it cannot see.
+    """
+    rank_state: dict = {}
+    _apply_connect_body(workflow, op, graph, rank_state)
+    dst = rank_state.get("dst")
+    if dst is not None:
+        _rank_autogrow_group(workflow, dst, rank_state["base"], rank_state.get("template"))
+
+
+def _apply_connect_body(workflow: dict, op: dict, graph, rank_state: dict) -> None:
     # Totality: an endpoint concurrently deleted => no crash and no dangling
     # link, so a merge consumer can replay a connect and a delete in either
     # order. Resolve the destination before mutating anything; if it is gone the
@@ -4538,6 +4613,20 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
         # schema's own element names, when the catalog carries a template).
         ins = dst.setdefault("inputs", [])
         to_idx = next((k for k, i in enumerate(ins) if i.get("grow_id") == op["link_id"]), None)
+        inputcount = grow.get("inputcount")
+        port = None
+        template = None
+        if not grow.get("promoted") and not grow.get("widget") and inputcount is None:
+            base = _autogrow_base(str(grow["name"]))
+            port = _autogrow_group_port(graph, dst, base)
+            template = grow.get("template")
+            if template is None and port is not None:
+                template = port.autogrow_template
+            # Same predicate the removed tail call used, captured here so every
+            # exit below ranks the group it grew.
+            rank_state["dst"] = dst
+            rank_state["base"] = base
+            rank_state["template"] = template
         if grow.get("promoted"):
             # A promoted subgraph input is ONE register named by the definition
             # (``("input", to_node, "grow", name)``), not a fresh slot per
@@ -4574,7 +4663,6 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
             if dynamic_wins:
                 _lww_commit(workflow, identity_op)
         if to_idx is None:
-            inputcount = grow.get("inputcount")
             if grow.get("promoted"):
                 name = grow["name"]
             elif inputcount is not None:
@@ -4583,9 +4671,6 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 # base.elemN fallback — that name is meaningless for this family.
                 name = _next_inputcount_name(ins, grow["name"])
             else:
-                base = _autogrow_base(str(grow["name"]))
-                port = None if grow.get("widget") else _autogrow_group_port(graph, dst, base)
-                template = None if port is None else port.autogrow_template
                 name = _next_autogrow_name(ins, grow["name"], template)
                 if port is not None and name != grow["name"]:
                     # A replay collision renamed the slot: never mint one past
@@ -4609,6 +4694,8 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 entry["widget"] = {"name": grow["widget"]}
             ins.append(entry)
             to_idx = len(ins) - 1
+            if not grow.get("promoted") and not grow.get("widget") and inputcount is None:
+                workflow.setdefault("_autogrow_ranks", {})[str(op["link_id"])] = _stamp_key(op)
             if inputcount is not None:
                 # Bump using the op's mint-time-planned value (NOT re-derived
                 # from a post-collision-renamed slot number): every op's
@@ -5007,6 +5094,7 @@ def _apply_reset_doc(workflow: dict, op: dict) -> None:
     workflow["_applied_ops"] = []
     workflow["_applied_op_digests"] = {}
     workflow["_widget_stamps"] = {}
+    workflow["_autogrow_ranks"] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -5085,7 +5173,16 @@ def detect_conflict(a: dict, b: dict) -> bool:
     ask-to-merge raises instead of silently clobbering. Two autogrow connects to
     the same base conflict here (their batch order is undecidable leaderlessly)
     even though :func:`apply_op` keeps both connections and ``canonical`` treats
-    their order as immaterial."""
+    their order as immaterial.
+
+    **The rank map does not make this False.** ``_autogrow_ranks`` lives only
+    inside a live document — ``strip_internal`` and ``canonical`` both drop it,
+    and comfy-cli loads, applies, strips and writes — so two grows that arrive
+    in separate invocations never see each other's ranks and fall back to
+    arrival order. This function sees two ops and no document, so it cannot tell
+    a ranked pair from an unranked one. It stays True for the pair and the
+    ranking's guarantee is scoped to a single replay session (see
+    ``_rank_autogrow_group``)."""
 
     def mutated_definition_path(op: dict) -> list[str] | None:
         path = op.get("path")
@@ -5155,6 +5252,7 @@ def canonical(workflow: dict) -> dict:
     w.pop("_applied_ops", None)
     w.pop("_applied_op_digests", None)
     w.pop("_widget_stamps", None)
+    w.pop("_autogrow_ranks", None)
     w.pop("_pending_dynamic_connects", None)
     w.pop("_deferred_widget_ops", None)
     nodes = w.get("nodes")
@@ -5263,6 +5361,7 @@ def strip_internal(workflow: dict) -> dict:
     workflow.pop("_applied_ops", None)
     workflow.pop("_applied_op_digests", None)
     workflow.pop("_widget_stamps", None)
+    workflow.pop("_autogrow_ranks", None)
     workflow.pop("_pending_dynamic_connects", None)
     workflow.pop("_deferred_widget_ops", None)
     return complete_save_format(workflow)
@@ -6034,7 +6133,10 @@ def _resolve_schema_autogrow(
                 f"(existing: {grown}) — connect to the base {base!r} to auto-append, "
                 f"or use the next free key {name!r}"
             )
-        return None, {"name": name, "type": declared or elem_type or "*"}
+        grow: dict[str, Any] = {"name": name, "type": declared or elem_type or "*"}
+        if template is not None:
+            grow["template"] = dict(template)
+        return None, grow
     return None
 
 
@@ -6067,4 +6169,7 @@ def _plan_autogrow(ins: list, base: str, elem_type: str | None, template: dict |
     explicitly requested key against this name before growing."""
     taken = {str(i.get("name", "")) for i in ins}
     elem = _autogrow_elem_name(base, _first_free_autogrow_index(taken, base, template), template)
-    return {"name": f"{base}.{elem}", "type": elem_type or "*"}
+    grow = {"name": f"{base}.{elem}", "type": elem_type or "*"}
+    if template is not None:
+        grow["template"] = dict(template)
+    return grow

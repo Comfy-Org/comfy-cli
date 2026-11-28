@@ -394,8 +394,12 @@ interior edits use the existing id-addressed op scopes.
   the bounds and the ledger contract. **Uniqueness scope is
   PER-WORKFLOW**: the same `op_id` can exist in two different workflow documents
   without interaction; within one document each op applies exactly once.
-* `_applied_ops`, `_applied_op_digests` (and `_widget_stamps`) are apply-time
-  bookkeeping, stripped before serialization to disk (`strip_internal`).
+* `_applied_ops`, `_applied_op_digests`, `_widget_stamps` and `_autogrow_ranks`
+  are apply-time bookkeeping, stripped before serialization to disk
+  (`strip_internal`). `_autogrow_ranks` maps a grown slot's `grow_id` to its
+  total op rank; like `_widget_stamps` it lives only inside a live document, so
+  every guarantee derived from it is scoped to a single replay session and
+  nothing in the save format depends on it.
 
 ## 3. Conflict rules
 
@@ -428,7 +432,7 @@ and `"7"` two registers for one node.
 | concurrent moves | no `move` op exists in v1 — positions are decided once at `add_node` mint time and frozen into the op; live position editing is frontend view state, out of scope until the FE stable-ID reconciliation (section 6) | `add_node` / `layout.cascade_pos` |
 | edges referencing deleted nodes | the connect no-ops (delete wins); a delete removes incident links and scrubs every dangling input/output reference, so no dangling edge survives either order | `_apply_connect`, `_apply_delete_node` |
 | duplicate entity creation | Agent-bound frontend and structured-edit ranges are disjoint; legacy frontend counters seeded from `last_node_id` are outside that guarantee, because `_apply_add_node` raises the mark to any minted id; all structured-edit writers share one random range regardless of `actor`; a collision is unlikely but possible and resolves first-arrival-wins without a collision signal; a replayed `add_node` whose `node_id` already exists is a no-op; a re-sent op is dropped by `op_id` | `mint_id`, `_apply_add_node` |
-| concurrent autogrow connects to one base | both survive: each grows a fresh slot keyed by `grow_id`; their display order is the one sequence decision a leaderless writer cannot make and is surfaced by `detect_conflict` for the merge consumer | `_apply_connect` (grow path), `detect_conflict` |
+| concurrent autogrow connects to one base | both survive: each grows a fresh slot keyed by `grow_id`; **within one replay session** their names and positions are additionally ranked by `[base_version, actor, op_id]`, so a batch replayed in any order lands on one display order. The rank map is in-process bookkeeping (§2) and does not survive a write, so across invocations display order is still the one sequence decision a leaderless writer cannot make and `detect_conflict` still surfaces the pair for the merge consumer | `_apply_connect` (grow path), `_rank_autogrow_group`, `detect_conflict` |
 | invalid / inapplicable ops | explicit per kind — unknown kind: **reject** (`apply_op` raises); malformed op (missing required field): **reject**; well-formed op whose target node is gone: **no-op** (delete wins); `set_widget` naming a widget the live schema does not have: **reject**; `clear`/`reset_doc` inside a batch: **reject** with `workflow_clear_not_batchable` / `unknown op`. Rejection is never silent | `apply_op`, `apply_specs`, `_widget_index` |
 
 ## 4. Partial batches: abort-remainder
@@ -1871,3 +1875,41 @@ matching what §1.7 promises.
 **No other section changes.** §§2-8 and amendments v1.1-v1.15 are untouched, and
 no existing kind is removed or re-scoped.
 
+
+## 27. Amendment v1.18 — 2026-11-27 (autogrow display order inside one replay session)
+
+**No op kind was added, removed, or re-scoped.** `FROZEN_OPS` / `DEFERRED_OPS` /
+`BATCHABLE_OPS`, the dispatch tables and §§1-8 are untouched. This amendment
+records the §3 conflict-row refinement for concurrent autogrow connects and one
+addition to §2's bookkeeping list, which is the §9 route for both and the reason
+neither is a silent in-place edit.
+
+**What changed.** Applying an ordinary autogrow `connect` now records the op's
+total rank `[base_version, actor, op_id]` — the same key `_stamp_key` already
+produces for LWW writes — under the grown slot's `grow_id`, in a document-local
+`_autogrow_ranks` map, and re-sorts that base's grown slots by it. So a batch of
+concurrent grows **replayed in any order within one session** lands on one set of
+display names and one set of input positions, with link rows repaired to match.
+The semantic graph was already convergent (§1.2: each grow mints its own slot,
+`canonical` folds grown-slot order); what converges now is what a human sees.
+
+**What did NOT change, and this is the load-bearing half.** `detect_conflict`
+still returns True for two autogrow connects onto one base, so the ask-to-merge
+net §3 describes is intact. `_autogrow_ranks` is apply-time bookkeeping (§2):
+`strip_internal` and `canonical` both drop it, and comfy-cli's own loop is
+load → apply → strip → write. Two grows that arrive in **separate invocations**
+therefore never see each other's ranks and fall back to arrival order, and
+`detect_conflict` is handed two ops with no document, so it cannot distinguish a
+ranked pair from an unranked one. Claiming convergence there would have been a
+guarantee the serialization boundary does not support.
+
+*Why not a doc-side rank map.* Persisting ranks beside `_widget_stamps` would
+make the guarantee total, and it is a save-format change: it needs a frozen-section
+amendment to §2's save contract **and** matching parity work in
+`comfy-multi-player`, which is a larger change than the one this records. The
+narrower claim was taken deliberately (`comfy-cli#826` review, finding 2);
+persisting the map stays available and unprejudiced.
+
+**No other section changes.** §§2-8 and amendments v1.1-v1.17 are untouched
+except for §2's bookkeeping bullet and §3's autogrow row, both named above, and
+no existing kind is removed or re-scoped.

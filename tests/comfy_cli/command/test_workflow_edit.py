@@ -2591,6 +2591,97 @@ class TestOpModel:
         # ...and the two orders converge.
         assert ops.canonical(ab) == ops.canonical(ba)
 
+    def test_p9_autogrow_display_order_uses_total_stamp_rank(self):
+        """Concurrent grows get identical names/order in both replay orders."""
+        ops = self._ops()
+        g = _graph()
+        base = _autogrow_workflow()
+        _, lower = ops.connect(copy.deepcopy(base), g, 20, "IMAGE", 10, "images", actor="a", base_version=4)
+        _, higher = ops.connect(copy.deepcopy(base), g, 21, "IMAGE", 10, "images", actor="a", base_version=4)
+        lower["op_id"] = "0" * 32
+        higher["op_id"] = "f" * 32
+
+        ab = ops.apply_op(ops.apply_op(copy.deepcopy(base), lower, g), higher, g)
+        ba = ops.apply_op(ops.apply_op(copy.deepcopy(base), higher, g), lower, g)
+
+        def display(workflow):
+            node = next(n for n in workflow["nodes"] if n["id"] == 10)
+            return [(i["name"], i.get("grow_id"), i.get("link")) for i in node["inputs"]]
+
+        assert display(ab) == display(ba)
+        assert [name for name, grow_id, _ in display(ab) if grow_id is not None] == [
+            "images.image0",
+            "images.image1",
+        ]
+        assert ops.canonical(ab) == ops.canonical(ba)
+        # Still a conflict, deliberately: the rank map does not survive a write
+        # (`_autogrow_ranks` is stripped by `strip_internal`/`canonical`), so the
+        # convergence asserted above is scoped to one replay session and
+        # `detect_conflict` keeps the ask-to-merge net for the cross-invocation
+        # case it cannot distinguish. Amendment v1.18; #826 review, finding 2.
+        assert ops.detect_conflict(lower, higher) is True
+
+    def test_p9_autogrow_display_order_ranks_on_source_slot_drift(self):
+        """A grow whose source SLOT has drifted exits `_apply_connect` early,
+        and its group must still be ranked.
+
+        The slot is appended and its rank recorded before that exit, so when the
+        sort ran only on the fully successful tail this pair came back in
+        ARRIVAL order — `[lo, hi]` one way and `[hi, lo]` the other — while
+        `canonical()` folded the difference away and reported convergence.
+        #826 review, finding 1.
+        """
+        ops = self._ops()
+        g = _graph()
+        base = _autogrow_workflow()
+        _, lower = ops.connect(copy.deepcopy(base), g, 20, "IMAGE", 10, "images", actor="a", base_version=4)
+        _, higher = ops.connect(copy.deepcopy(base), g, 21, "IMAGE", 10, "images", actor="a", base_version=4)
+        lower["op_id"] = "0" * 32
+        higher["op_id"] = "f" * 32
+        # Source slot 9 does not exist on node 20, so `lower` grows its slot,
+        # claims its register and then returns before any link is installed.
+        # It has to be the LOWER-ranked op that drifts: a healthy op applied
+        # afterwards re-sorts the whole group from its own tail, so the
+        # divergence only survives when the drifted op is both last to apply in
+        # one order and first in rank. That asymmetry is why the tail-only
+        # placement looked correct under the commutativity tests above.
+        lower["from_slot"] = 9
+
+        ab = ops.apply_op(ops.apply_op(copy.deepcopy(base), lower, g), higher, g)
+        ba = ops.apply_op(ops.apply_op(copy.deepcopy(base), higher, g), lower, g)
+
+        def grown(workflow):
+            node = next(n for n in workflow["nodes"] if n["id"] == 10)
+            return [(i["name"], i.get("grow_id"), i.get("link")) for i in node["inputs"] if i.get("grow_id")]
+
+        # Rank order is by op_id here, so the lower op_id takes images.image0 in
+        # BOTH apply orders. Asserted on the name/grow_id pairing rather than on
+        # canonical(), which folds exactly this difference out by design.
+        assert grown(ab) == grown(ba), (grown(ab), grown(ba))
+        assert [name for name, _, _ in grown(ab)] == ["images.image0", "images.image1"]
+        assert dict((gid, name) for name, gid, _ in grown(ab)) == {
+            lower["link_id"]: "images.image0",
+            higher["link_id"]: "images.image1",
+        }
+        # The drifted op installs no link; the healthy one keeps its own.
+        assert dict((gid, link) for _, gid, link in grown(ab)) == {
+            lower["link_id"]: None,
+            higher["link_id"]: higher["link_id"],
+        }
+
+    def test_autogrow_replay_with_existing_slot_is_idempotent(self):
+        """A replay can reach an existing grow slot after applied-op history is lost."""
+        ops = self._ops()
+        graph = _graph_with_autogrow_template({"prefix": "frame"})
+        base = _autogrow_workflow()
+        applied, op = ops.connect(base, graph, 20, "IMAGE", 10, "images", actor="a")
+        expected = ops.canonical(applied)
+
+        applied.pop("_applied_ops", None)
+        replayed = ops.apply_op(applied, op, graph)
+
+        assert ops.canonical(replayed) == expected
+
     def test_autogrow_uses_schema_prefix_zero_based(self):
         """A ``{"prefix": "frame"}`` template names grown slots verbatim from
         the schema, 0-based (images.frame0, images.frame1) — a prefix that
@@ -2699,6 +2790,24 @@ class TestOpModel:
             ins = next(n for n in out["nodes"] if n["id"] == 10)["inputs"]
             names = {i["name"] for i in ins if str(i["name"]).startswith("images.")}
             assert names == {"images.first", "images.second"}, names
+        assert ops.canonical(ab) == ops.canonical(ba)
+
+    def test_p9_autogrow_template_converges_without_catalog(self):
+        """The mint-time template travels with an op so catalog-free replicas
+        preserve schema names while reranking concurrent grows."""
+        ops = self._ops()
+        graph = _graph_with_autogrow_template({"prefix": "frame"})
+        base = _autogrow_workflow()
+        _, op1 = ops.connect(copy.deepcopy(base), graph, 20, "IMAGE", 10, "images", actor="a")
+        _, op2 = ops.connect(copy.deepcopy(base), graph, 21, "IMAGE", 10, "images", actor="b")
+
+        ab = ops.apply_op(ops.apply_op(copy.deepcopy(base), op1, None), op2, None)
+        ba = ops.apply_op(ops.apply_op(copy.deepcopy(base), op2, None), op1, None)
+
+        for out in (ab, ba):
+            inputs = next(node for node in out["nodes"] if node["id"] == 10)["inputs"]
+            names = {item["name"] for item in inputs if item.get("grow_id") is not None}
+            assert names == {"images.frame0", "images.frame1"}
         assert ops.canonical(ab) == ops.canonical(ba)
 
     # ---------------------------------------------------------------------
