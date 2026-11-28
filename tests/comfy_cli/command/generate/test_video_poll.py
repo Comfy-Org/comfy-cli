@@ -200,3 +200,38 @@ def test_existing_bfl_poller_still_works(no_sleep, monkeypatch):
     result = poll.get_poller("bfl")({"polling_url": "https://x"}, api_key="k")
     assert result.status == "succeeded"
     assert "https://cdn/b.png" in result.image_urls
+
+
+def test_extract_inline_blobs_reads_b64_json():
+    """#613: GPT Image 2 answers data[].b64_json; the sync path must decode it
+    instead of reporting "no image URLs found"."""
+    import base64
+
+    png = base64.b64encode(b"\x89PNG fake").decode()
+    body = {"created": 1, "data": [{"b64_json": png}]}
+    blobs = poll._extract_inline_blobs(body)
+    assert blobs == [("image/png", b"\x89PNG fake")]
+
+
+def test_extract_inline_blobs_ignores_url_only_bodies():
+    assert poll._extract_inline_blobs({"data": [{"url": "https://cdn/x.png"}]}) == []
+    assert poll._extract_inline_blobs({"error": {"message": "bad"}}) == []
+
+
+def test_sync_result_from_response_carries_blobs():
+    """The normalized terminal state carries inline blobs alongside URLs, so
+    --download can save GPT Image answers."""
+    import base64
+
+    png = base64.b64encode(b"\x89PNG fake").decode()
+
+    class FakeResponse:
+        headers = {"content-type": "application/json"}
+
+        def json(self):
+            return {"data": [{"b64_json": png}]}
+
+    result = poll.sync_result_from_response(FakeResponse())
+    assert result.status == "succeeded"
+    assert result.image_urls == []
+    assert result.blobs == [("image/png", b"\x89PNG fake")]
