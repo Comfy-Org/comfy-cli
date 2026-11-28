@@ -304,7 +304,7 @@ def test_a_newer_update_waiting_ends_the_wait_and_names_the_one_stopped(monkeypa
     assert _envelope(result)["data"]["cancelledUpdate"]["release"] == {"id": "release-5", "version": 5}
 
 
-def test_a_copy_that_finishes_stopping_keeps_a_newer_update_waiting() -> None:
+def test_the_fake_copy_stop_countdown_keeps_a_newer_update_waiting() -> None:
     client = _waiting(kind="compute", release_id="release-4")
     client.move = "pending"
     client.stop_kept_release("dep-prod", "release-4")
