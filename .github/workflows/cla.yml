@@ -40,7 +40,21 @@ jobs:
             echo "Failed to fetch pull request commits" >&2
             exit 1
           fi
-          others=$(printf '%s\n' "$commit_authors" | sort -u | grep -vix "${PR_AUTHOR}" | paste -sd, -)
+          # `|| true` is load-bearing: the default shell is `bash -e`, an assignment takes the
+          # exit status of its command substitution, and this grep exits 1 whenever the author
+          # is the only committer -- which is most PRs.
+          candidates=$(printf '%s\n' "$commit_authors" | sort -u | grep -vix "${PR_AUTHOR}" || true)
+          # A committer name that is not a GitHub login is free-form git metadata chosen by
+          # whoever made the commit. The CLA action splits `allowlist` on "," and turns any
+          # entry containing "*" into an unanchored regex, so both characters are allowlist
+          # syntax here: a derived name of "*" becomes ".*" and matches every committer,
+          # satisfying the CLA with no signature. Drop such names instead of interpolating
+          # them, and say which ones were dropped so a surprising "please sign" has a reason.
+          dropped=$(printf '%s\n' "$candidates" | grep -E '[,*]' | paste -sd';' -)
+          if [ -n "$dropped" ]; then
+            echo "::warning::Ignoring committer name(s) containing ',' or '*', which would be read as CLA allowlist syntax: ${dropped}"
+          fi
+          others=$(printf '%s\n' "$candidates" | grep -vE '[,*]' | paste -sd, -)
           if [ -n "$others" ]; then
             echo "allowlist=${BASE_ALLOWLIST},${others}" >> "$GITHUB_OUTPUT"
           else
