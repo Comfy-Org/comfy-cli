@@ -2276,7 +2276,8 @@ def _schema_widget_pairs(
             positional_pair_names = [name for name, _ in pairs]
             named_pair_names = [name for name, _ in named_pairs]
             preserves_positional_structure = named_pair_names[: len(positional_pair_names)] == positional_pair_names
-            saved_widget_names = _saved_widget_names(node, schema, positional_pair_names)
+            filled_widget_names = [name for name, value in pairs if value is not None]
+            saved_widget_names = _saved_widget_names(node, schema, filled_widget_names)
             named_tail_is_saved = saved_widget_names is None or all(
                 name in _marker_coverage(saved_widget_names) for name in named_pair_names[len(positional_pair_names) :]
             )

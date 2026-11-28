@@ -323,6 +323,13 @@ def test_a_complete_marker_inventory_can_exclude_a_stale_named_tail(object_info)
     assert inputs == {"width": 1024, "height": 512, "batch_size": 1}
 
 
+def test_a_none_slot_does_not_make_an_unmarked_named_tail_look_saved(object_info):
+    node = _node([1024, None], {"width": 1024, "height": 768, "batch_size": 4})
+    node["inputs"] = [{"name": "width", "widget": {"name": "width"}}]
+    inputs = _convert(node, object_info)
+    assert inputs == {"width": 1024, "height": None, "batch_size": 1}
+
+
 def test_a_map_may_fill_a_none_hole_the_array_left(object_info):
     """A ``None`` slot is excluded from the candidate test's requirement, so the
     map need not carry it. When it does, the map wins.
