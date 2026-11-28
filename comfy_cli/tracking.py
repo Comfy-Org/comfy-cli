@@ -122,6 +122,19 @@ _SENSITIVE_EXACT = frozenset(
         "repository",
         "commit",
         "file",
+        "path",
+        "deps",
+        "output",
+        # path-valued options the sweep of every track_command callback found
+        # (out_dir is the high-traffic one: comfy-mcp's fetch_outputs shells
+        # out to `comfy download <prompt_id> -o <out_dir>` on the MCP path):
+        "out_dir",
+        "custom_nodes_dir",
+        "project_dir",
+        "input_path",
+        "lib",
+        "ops_file",
+        "recipe_file",
         # `workflow add-node --text`: a note body is verbatim user content, like
         # `--prompt` — analytics only learns that the option was supplied.
         "text",

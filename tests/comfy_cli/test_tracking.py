@@ -467,6 +467,65 @@ class TestTrackCommandRedaction:
         assert properties["name"] == "demo"
         assert "sk-supersecret" not in str(properties)
 
+    def test_path_valued_names_are_redacted(self, tracking_module):
+        """The module comment's contract: every path-valued str option is named
+        in _SENSITIVE_EXACT. restore-snapshot (path), install-deps (deps) and
+        the snapshot/writers (output) joined workflow and from_snapshot late —
+        these used to ship the user's home directory verbatim."""
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command()
+        def some_cmd(
+            path=None,
+            deps=None,
+            output=None,
+            workflow=None,
+            from_snapshot=None,
+            out_dir=None,
+            custom_nodes_dir=None,
+            project_dir=None,
+            input_path=None,
+            lib=None,
+            ops_file=None,
+            recipe_file=None,
+        ):
+            return None
+
+        some_cmd(
+            path=r"C:\Users\me\private\snap.json",
+            deps=r"/home/me/priv/deps.json",
+            output=r"D:\private\out.json",
+            workflow=r"/home/me/wf.json",
+            from_snapshot=r"/home/me/from.json",
+            out_dir=r"/home/me/private/outs",
+            custom_nodes_dir=r"/home/me/private/custom_nodes",
+            project_dir=r"/home/me/private/proj",
+            input_path=r"/home/me/private/object_info.json",
+            lib=r"/home/me/private/fragments",
+            ops_file=r"/home/me/private/ops.json",
+            recipe_file=r"/home/me/private/recipe.json",
+        )
+
+        _command_tracked_once(tracking_module.provider)
+        _, _, properties = _first_track_call(tracking_module.provider)
+        for name in (
+            "path",
+            "deps",
+            "output",
+            "workflow",
+            "from_snapshot",
+            "out_dir",
+            "custom_nodes_dir",
+            "project_dir",
+            "input_path",
+            "lib",
+            "ops_file",
+            "recipe_file",
+        ):
+            assert properties[name] == "<redacted>"
+        assert "private" not in str(properties)
+        assert "Users" not in str(properties)
+
     def test_api_key_none_stays_none(self, tracking_module):
         # When the user didn't pass --api-key (or set $COMFY_API_KEY), we still
         # want to be able to see in the analytics that it was absent — not a
