@@ -304,6 +304,19 @@ def test_a_newer_update_waiting_ends_the_wait_and_names_the_one_stopped(monkeypa
     assert _envelope(result)["data"]["cancelledUpdate"]["release"] == {"id": "release-5", "version": 5}
 
 
+def test_a_copy_that_finishes_stopping_keeps_a_newer_update_waiting() -> None:
+    client = _waiting(kind="compute", release_id="release-4")
+    client.move = "pending"
+    client.stop_kept_release("dep-prod", "release-4")
+    client.move_deployment("dep-prod", 3, "release-5")
+
+    for _ in range(client.copy_stop_reads + 1):
+        row = client.get_deployment("dep-prod")
+
+    assert row["pendingUpdate"]["releaseId"] == "release-5"
+    assert row["pendingUpdate"]["status"] == "provisioning"
+
+
 def test_a_cancellation_that_does_not_finish_hands_the_watch_back(monkeypatch) -> None:
     client = _SlowStop(list(_waiting().rows.values()))
     client.reads = 1000
