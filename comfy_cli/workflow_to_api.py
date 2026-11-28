@@ -2278,10 +2278,25 @@ def _schema_widget_pairs(
             preserves_positional_structure = named_pair_names[: len(positional_pair_names)] == positional_pair_names
             filled_widget_names = [name for name, value in pairs if value is not None]
             saved_widget_names = _saved_widget_names(node, schema, filled_widget_names)
-            named_tail_is_saved = saved_widget_names is None or all(
-                name in _marker_coverage(saved_widget_names) for name in named_pair_names[len(positional_pair_names) :]
-            )
-            if preserves_positional_structure and named_tail_is_saved and (not exact or named_exact):
+            if saved_widget_names is not None:
+                marker_coverage = _marker_coverage(saved_widget_names)
+                socketless_names = {name for name, spec in ordered if _is_socketless_widget(spec)}
+                named_prefix = [
+                    positional_pair
+                    if positional_pair[1] is None
+                    and positional_pair[0] not in marker_coverage
+                    and positional_pair[0] not in socketless_names
+                    else named_pair
+                    for positional_pair, named_pair in zip(
+                        pairs, named_pairs[: len(positional_pair_names)], strict=True
+                    )
+                ]
+                named_pairs = named_prefix + [
+                    pair
+                    for pair in named_pairs[len(positional_pair_names) :]
+                    if pair[0] in marker_coverage or pair[0] in socketless_names
+                ]
+            if preserves_positional_structure and (not exact or named_exact):
                 pairs, warnings = named_pairs, named_warnings
 
     for warning in warnings:
