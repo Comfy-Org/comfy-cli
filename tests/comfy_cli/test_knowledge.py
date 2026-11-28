@@ -1918,6 +1918,8 @@ class TestNamedModelDisambiguation:
             "Qwen 2.1２",
             "Qwen 2.1K",
             "Qwen 2.1İ",
+            "Qwen\u0301 2.1",
+            "Qw\u200den 2.1",
             "Qwеn 2.1",  # Cyrillic e
         ],
     )
@@ -1937,6 +1939,8 @@ class TestNamedModelDisambiguation:
             "Qwen Image 2.1²",
             "Qwen Image 2.1K",
             "Qwen Image 2.1İ",
+            "Qwen\u0301 Image 2.1",
+            "Qw\u200den Image 2.1",
             "Qwеn Image 2.1",
         ],
     )
@@ -2007,11 +2011,61 @@ class TestNamedModelDisambiguation:
         assert knowledge.resolve_id(b, "Qwen Text 2.1") == "qwen-image-2-1"
         assert knowledge.model_candidates(b, "Qwen 2.1") == ["qwen-image-2-1"]
 
+    def test_case_distinct_canonical_candidates_resolve_to_their_own_rows(self, monkeypatch, capsys):
+        """A suggestion is actionable only when its exact id returns that id's row."""
+        ids = ["QWEN-IMAGE-2-1", "qwen-image-2-1"]
+        b = knowledge._index(
+            {
+                "models": {
+                    ids[0]: {"owner": "upper"},
+                    ids[1]: {"owner": "lower", "aliases": ["Qwen Photo 2.1"]},
+                }
+            },
+            None,
+            source="env",
+            stale=False,
+            path="fixture",
+            mtime=0,
+        )
+        monkeypatch.setattr(knowledge, "load_bundle", lambda **kw: b)
+
+        rc, env = _run(["resolve", "Qwen 2.1"], capsys)
+        assert rc == 1
+        assert env["error"]["code"] == "knowledge_unknown_model"
+        assert env["error"]["details"]["candidate_ids"] == sorted(ids)
+        for model_id in env["error"]["details"]["candidate_ids"]:
+            assert knowledge.resolve_id(b, model_id) == model_id
+            rc, resolved = _run(["resolve", model_id], capsys)
+            assert rc == 0
+            assert resolved["data"]["id"] == model_id
+            assert resolved["data"]["model"]["owner"] == ("upper" if model_id == ids[0] else "lower")
+
+        # Case folding cannot choose between distinct canonical ids. This is
+        # still an unknown-model error, not a fuzzy or single-candidate resolve.
+        ambiguous = "QwEn-ImAgE-2-1"
+        assert ambiguous not in b.models
+        assert knowledge.resolve_id(b, ambiguous) is None
+        rc, env = _run(["resolve", ambiguous], capsys)
+        assert rc == 1
+        assert env["error"]["code"] == "knowledge_unknown_model"
+
     def test_raw_unicode_model_id_cannot_offer_ascii_candidates(self):
         mid = "Qwen Image 2.1K"
         b = knowledge._index({"models": {mid: {}}}, None, source="env", stale=False, path="fixture", mtime=0)
         assert knowledge.resolve_id(b, mid) == mid
         assert knowledge.model_candidates(b, "Qwen 2.1") == []
+
+    @pytest.mark.parametrize("separator", ["\u00a0", "–", "—", "“", "™", "®"])
+    def test_unicode_separators_and_symbols_remain_suggestible(self, separator):
+        b = knowledge._index(
+            {"models": {"qwen-image-2-1": {"aliases": [f"Qwen Image 2.1 {separator} Master"]}}},
+            None,
+            source="env",
+            stale=False,
+            path="fixture",
+            mtime=0,
+        )
+        assert knowledge.model_candidates(b, f"Qwen{separator} 2.1") == ["qwen-image-2-1"]
 
     def test_future_image_vl_and_text_models_remain_an_explicit_choice(self, monkeypatch, capsys):
         # Synthetic future catalog: no preference for Image, VL, or text.
@@ -2032,15 +2086,12 @@ class TestNamedModelDisambiguation:
         assert knowledge.resolve_id(b, "Qwen 2.1") is None
         assert knowledge.model_candidates(b, "Qwen VL 2.1") == ["qwen-vl-2-1"]
 
-    def test_candidates_exclude_ids_that_do_not_resolve_to_themselves(self):
-        # Ids that differ only by case share one lowercase lookup key, so the
-        # second id is unreachable by `resolve <id>`; suggesting it would send
-        # the caller to retry an id that resolves to a different model.
+    def test_candidate_aliases_follow_trimmed_final_resolution(self):
         b = knowledge._index(
             {
                 "models": {
-                    "Acme-2-1": {"id": "Acme-2-1"},
-                    "acme-2-1": {"id": "acme-2-1", "aliases": ["Acme Turbo 2.1"]},
+                    "acme-pro-2-1": {},
+                    "acme-lite-2-1": {"aliases": [" acme-pro-2-1"]},
                 }
             },
             None,
@@ -2049,8 +2100,100 @@ class TestNamedModelDisambiguation:
             path="fixture",
             mtime=0.0,
         )
-        assert knowledge.resolve_id(b, "acme-2-1") == "Acme-2-1"
-        assert knowledge.model_candidates(b, "Acme 2.1") == ["Acme-2-1"]
+        assert knowledge.resolve_id(b, " acme-pro-2-1") == "acme-pro-2-1"
+        assert knowledge.model_candidates(b, "Acme Pro 2.1") == ["acme-pro-2-1"]
+
+    @pytest.mark.parametrize("padded_id", [" acme-pro-2-1", "acme-pro-2-1 "])
+    @pytest.mark.parametrize("with_trimmed_twin", [False, True])
+    def test_loaded_candidates_resolve_back_to_their_own_rows(
+        self, tmp_path, monkeypatch, capsys, padded_id, with_trimmed_twin
+    ):
+        canonical_id = "acme-pro-2-1"
+        case_ids = ["ACME-CASE-2-1", "acme-case-2-1"]
+        models = {
+            padded_id: {"owner": "padded", "aliases": ["Acme Special 2.1"]},
+            case_ids[0]: {"owner": "upper"},
+            case_ids[1]: {"owner": "lower", "aliases": ["Acme Normal 2.1", "Acme—Symbol 2.1"]},
+        }
+        if with_trimmed_twin:
+            models[canonical_id] = {"owner": "canonical"}
+        data = {
+            "models": models,
+            "aliases": {
+                "Acme Featured 2.1": padded_id,
+                "Acme Missing 2.1": "missing-row",
+                "CJK 文本 9.9": canonical_id,
+            },
+        }
+        path = tmp_path / "candidate-knowledge.json"
+        path.write_text(json.dumps(data))
+        monkeypatch.setenv(knowledge.ENV_FILE, str(path))
+
+        bundle = knowledge.load_bundle()
+        assert bundle is not None
+        expected_ids = {padded_id, *case_ids}
+        expected_candidates = sorted(case_ids)
+        if with_trimmed_twin:
+            expected_ids.add(canonical_id)
+            expected_candidates.append(canonical_id)
+            expected_candidates.sort()
+        assert set(bundle.models) == expected_ids
+        resolved_padded_id = canonical_id if with_trimmed_twin else padded_id
+        assert knowledge.resolve_id(bundle, padded_id) == resolved_padded_id
+        assert knowledge.resolve(bundle, padded_id) is bundle.models[resolved_padded_id]
+        assert knowledge.resolve_id(bundle, "  Acme Normal 2.1 ") == case_ids[1]
+        assert knowledge.resolve_id(bundle, "Acme Missing 2.1") is None
+        assert knowledge.resolve_id(bundle, "AcMe-CaSe-2-1") is None
+        assert knowledge.model_candidates(bundle, "CJK 文本 9.9") == []
+
+        candidates = knowledge.model_candidates(bundle, "Acme 2.1")
+        assert knowledge.model_candidates(bundle, "Acme—2.1") == candidates
+        assert candidates == expected_candidates
+
+        rc, unknown = _run(["resolve", "Acme 2.1"], capsys)
+        assert rc == 1
+        assert unknown["error"]["details"]["candidate_ids"] == expected_candidates
+        for model_id in candidates:
+            assert knowledge.resolve_id(bundle, model_id) == model_id
+            assert knowledge.resolve(bundle, model_id) is bundle.models[model_id]
+            rc, resolved = _run(["resolve", model_id], capsys)
+            assert rc == 0
+            assert resolved["data"]["id"] == model_id
+
+    @pytest.mark.parametrize("control", ["\x00", "\t", "\n", "\x7f"])
+    def test_ascii_controls_cannot_influence_query_or_alias_suggestions(self, tmp_path, monkeypatch, capsys, control):
+        safe_id = "acme-safe-2-1"
+        control_id = "opaque-control-target"
+        control_alias = f"Acme{control}Control 2.1"
+        path = tmp_path / "control-candidate-knowledge.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "models": {
+                        safe_id: {"aliases": ["Acme Safe 2.1"]},
+                        control_id: {"aliases": [control_alias]},
+                    }
+                }
+            )
+        )
+        monkeypatch.setenv(knowledge.ENV_FILE, str(path))
+
+        bundle = knowledge.load_bundle()
+        assert bundle is not None
+        assert set(bundle.models) == {safe_id, control_id}
+        assert knowledge.resolve_id(bundle, control_alias) == control_id
+        assert knowledge.model_candidates(bundle, "Acme 2.1") == [safe_id]
+        assert knowledge.model_candidates(bundle, f"Acme{control} 2.1") == []
+
+        rc, unknown = _run(["resolve", "Acme 2.1"], capsys)
+        assert rc == 1
+        assert unknown["error"]["details"]["candidate_ids"] == [safe_id]
+        rc, control_unknown = _run(["resolve", f"Acme{control} 2.1"], capsys)
+        assert rc == 1
+        assert control_unknown["error"]["details"].get("candidate_ids", []) == []
+        rc, resolved = _run(["resolve", control_alias], capsys)
+        assert rc == 0
+        assert resolved["data"]["id"] == control_id
 
     def test_candidates_skip_aliases_that_target_a_missing_row(self):
         b = knowledge._index(
@@ -2068,10 +2211,11 @@ class TestNamedModelDisambiguation:
 
     def test_candidates_are_general_sorted_bounded_and_deduplicated(self):
         ids = [f"acme-variant{letter}-2-1" for letter in "hgfedcba"]
+        missing_id = "aaa-missing-row"
         b = knowledge._index(
             {
                 "models": {mid: {"id": mid, "aliases": [mid.upper(), mid.replace("-", " ") + " turbo"]} for mid in ids},
-                "aliases": {"Acme Missing 2.1": "missing-row"},
+                "aliases": {"Acme Missing 2.1": missing_id},
             },
             None,
             source="env",
@@ -2079,6 +2223,9 @@ class TestNamedModelDisambiguation:
             path="fixture",
             mtime=0.0,
         )
+        # If the missing-row guard regresses, this id sorts into (not beyond)
+        # the returned window, making the equality below fail decisively.
+        assert missing_id < sorted(ids)[4]
         assert knowledge.model_candidates(b, "Acme 2.1") == sorted(ids)[:5]
         boundary_query = "Acme 2.1".ljust(knowledge.MAX_QUERY_CHARS)
         assert len(boundary_query) == 200
