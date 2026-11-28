@@ -37,6 +37,11 @@ dependencies = [
   # release that dropped the compromised e-Tugra root.
   "certifi>=2024.7.4",
   "charset-normalizer>=3",
+  # Imported only inside the Router `generate` path; must never be imported at
+  # module scope anywhere reachable from `comfy_cli.cmdline` (see
+  # tests/comfy_cli/test_tracking_lazy_import.py) because it loads pydantic_core
+  # and Windows cannot replace a loaded .pyd during `comfy install`.
+  "comfy-sdk>=0.6.0",
   "cookiecutter",
   "gitpython>=3.1.50",
   "httpx",

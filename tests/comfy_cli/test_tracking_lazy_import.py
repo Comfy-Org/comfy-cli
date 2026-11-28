@@ -23,7 +23,9 @@ import subprocess
 import sys
 
 # The SDKs themselves plus the transitive dependency that actually did the damage.
-_FORBIDDEN = ("mixpanel", "posthog", "pydantic", "pydantic_core")
+# comfy_sdk / comfy_low (the Router SDK) load pydantic_core the same way, so they
+# must stay function-scoped too — see router_client.py.
+_FORBIDDEN = ("mixpanel", "posthog", "pydantic", "pydantic_core", "comfy_sdk", "comfy_low")
 
 
 def _modules_after(source: str) -> set[str]:
@@ -122,6 +124,72 @@ def test_one_broken_sdk_does_not_silence_the_other():
         "providers = t._get_providers()\n"
         "names = [type(p).__name__ for p in providers]\n"
         "assert names == ['MixpanelProvider'], f'lost the healthy provider: {names!r}'\n"
+    )
+
+
+def test_importing_generate_does_not_load_the_sdk():
+    """The Router SDK must stay function-scoped: importing the generate command
+    (and its router client) must not pull in comfy_sdk or pydantic_core."""
+    loaded = _modules_after("import comfy_cli.command.generate.app\nimport comfy_cli.command.generate.router_client")
+    assert not loaded & set(_FORBIDDEN), (
+        f"importing generate loaded {sorted(loaded & set(_FORBIDDEN))} at module scope; "
+        "the Router SDK must stay function-scoped so `comfy --help` and `comfy install` "
+        "never load pydantic_core on Windows"
+    )
+
+
+def test_router_models_imports_the_sdk_on_call():
+    """The deferral is a deferral, not a removal — calling router_models imports
+    comfy_sdk (mirrors test_providers_are_built_on_first_dispatch)."""
+    loaded = _modules_after(
+        "from comfy_cli.command.generate.router_client import router_models\nrouter_models('comfyui-test')"
+    )
+    assert "comfy_sdk" in loaded
+
+
+def test_router_models_degrades_when_sdk_is_missing():
+    """A missing comfy_sdk surfaces as an ApiError that tells the user how to
+    recover, not a bare ImportError."""
+    _modules_after(
+        "import builtins\n"
+        "_real = builtins.__import__\n"
+        "def boom(name, *a, **k):\n"
+        "    if name == 'comfy_sdk':\n"
+        "        raise ModuleNotFoundError(\"No module named 'comfy_sdk'\", name='comfy_sdk')\n"
+        "    return _real(name, *a, **k)\n"
+        "builtins.__import__ = boom\n"
+        "from comfy_cli.command.generate.router_client import router_models\n"
+        "from comfy_cli.command.generate.client import ApiError\n"
+        "try:\n"
+        "    router_models('comfyui-test')\n"
+        "except ApiError as e:\n"
+        "    assert 'pip install -U comfy-cli' in str(e), f'unexpected message: {e}'\n"
+        "else:\n"
+        "    raise AssertionError('router_models did not raise ApiError when comfy_sdk was missing')\n"
+    )
+
+
+def test_router_models_names_the_cause_when_the_sdk_is_broken():
+    """An SDK that is installed but fails importing a dependency (e.g. a
+    half-replaced pydantic_core) must not be misreported as a missing SDK."""
+    _modules_after(
+        "import builtins\n"
+        "_real = builtins.__import__\n"
+        "def boom(name, *a, **k):\n"
+        "    if name == 'comfy_sdk':\n"
+        "        raise ImportError(\"cannot import name '__version__' from 'pydantic_core'\", name='pydantic_core')\n"
+        "    return _real(name, *a, **k)\n"
+        "builtins.__import__ = boom\n"
+        "from comfy_cli.command.generate.router_client import router_models\n"
+        "from comfy_cli.command.generate.client import ApiError\n"
+        "try:\n"
+        "    router_models('comfyui-test')\n"
+        "except ApiError as e:\n"
+        "    assert 'pydantic_core' in str(e), f'cause missing: {e}'\n"
+        "    assert 'pip install -U comfy-cli' not in str(e), f'misreported as missing: {e}'\n"
+        "    assert e.body == str(e), 'body must carry the hint for status+body renderers'\n"
+        "else:\n"
+        "    raise AssertionError('router_models did not raise ApiError when comfy_sdk was broken')\n"
     )
 
 
