@@ -823,6 +823,18 @@ history.
 
 ### Fixed
 
+- `comfy install` and `comfy node install-deps` now exit 1 at their own
+  validation instead of printing the error and continuing: `comfy install` on
+  a Python below 3.9 used to print "3.9 or higher is required" and then clone
+  and pip-install anyway (exit 0 — a launcher or CI step recorded a successful
+  install that broke at first launch), and `comfy node install-deps` with
+  neither `--deps` nor `--workflow` fell into `os.path.expanduser(None)` and
+  died with a `TypeError` traceback instead of the promised refusal. The
+  install-deps refusal is emitted as a registered error envelope
+  (`install_deps_missing_source`) so `--json` callers stay inside the error
+  contract. The 3.9 check now compares `(major, minor)` as a tuple, so a
+  hypothetical Python 4.0 is not refused as below 3.9.
+
 - `comfy assets library ls` reports a 401 or 403 as `cloud_unauthorized` even
   when the server drops the connection partway through its error body, instead
   of crashing with `IncompleteRead`.

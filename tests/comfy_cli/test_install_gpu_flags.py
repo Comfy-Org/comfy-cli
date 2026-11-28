@@ -64,3 +64,30 @@ def test_nvidia_on_macos_exits_without_installing(stub_install_env):
 
     assert result.exit_code == 1
     stub_install_env.assert_not_called()
+
+
+def test_python_below_39_exits_without_installing(stub_install_env):
+    """The 3.9+ message printed and execution continued: the install ran,
+    exited 0, and only failed later at first launch. Exit at the check."""
+    with patch("comfy_cli.cmdline.EnvChecker") as checker:
+        checker.return_value.python_version = MagicMock(major=3, minor=8)
+        with patch("comfy_cli.cmdline.utils.get_os", return_value=constants.OS.LINUX):
+            result = runner.invoke(app, ["install", "--nvidia", "--skip-manager"])
+
+    assert result.exit_code == 1
+
+
+def test_python_4_dot_0_is_not_refused_as_below_39(stub_install_env):
+    """`major < 3 or minor < 9` refused every hypothetical 4.x release
+    (4 < 3 is false, but 0 < 9 is true) — cosmetic while the branch only
+    printed, but now the check is a hard Exit(1), so a future Python 4
+    would be refused installation entirely. Compare (major, minor) as a
+    tuple instead."""
+    with patch("comfy_cli.cmdline.EnvChecker") as checker:
+        checker.return_value.python_version = MagicMock(major=4, minor=0)
+        with patch("comfy_cli.cmdline.utils.get_os", return_value=constants.OS.LINUX):
+            result = runner.invoke(app, ["install", "--nvidia", "--skip-manager"])
+
+    assert "3.9 or higher" not in result.output
+    assert result.exit_code == 0
+    stub_install_env.assert_called_once()
