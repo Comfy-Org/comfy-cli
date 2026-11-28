@@ -29,12 +29,12 @@ def _envelope(result) -> dict:
     return json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
 
 
-def _waiting(kind: str = "update", **served: str | None) -> FakeDeploy:
-    """A deployment serving v4 at revision 3, waiting on an update to v5."""
+def _waiting(kind: str = "update", release_id: str = "release-5", **served: str | None) -> FakeDeploy:
+    """A deployment serving v4 at revision 3, waiting on an update to ``release_id``."""
     row = deployment("dep-prod", release_id="release-4", **served)
     row["revision"] = 3
     row["pendingUpdate"] = {
-        "releaseId": "release-5",
+        "releaseId": release_id,
         "baseRevision": 3,
         "status": "provisioning",
         "since": "2026-10-07T12:00:00Z",
@@ -49,14 +49,11 @@ def _invoke(monkeypatch, client: FakeDeploy, *args: str, output: str = "--json")
     return CliRunner().invoke(app, [output, "deploy", "cancel", *args], env={"COLUMNS": "400"})
 
 
-def test_a_cancel_ends_the_waiting_update_and_keeps_the_release(monkeypatch) -> None:
-    # Given
+def test_a_cancel_stops_the_release_the_update_waits_on_and_keeps_the_release(monkeypatch) -> None:
     client = _waiting()
 
-    # When
     result = _invoke(monkeypatch, client, "--deployment", "dep-prod")
 
-    # Then
     assert result.exit_code == 0, result.stderr
     envelope = _envelope(result)
     assert envelope["changed"] is True
@@ -69,55 +66,58 @@ def test_a_cancel_ends_the_waiting_update_and_keeps_the_release(monkeypatch) -> 
     }
     assert data["deployment"]["revision"] == 3
     jsonschema.Draft202012Validator(_schema()).validate(data)
-    assert client.cancel_calls == ["dep-prod"]
-
-
-class _NoRevisionRead(FakeDeploy):
-    """A comfy-deploy whose rollout check fails on the read, so it leaves revision and pendingUpdate out."""
-
-    def get_deployment(self, deployment_id: str) -> JsonObject:
-        row = super().get_deployment(deployment_id)
-        row.pop("revision", None)
-        row.pop("pendingUpdate", None)
-        return row
-
-
-def test_a_read_without_a_revision_still_sends_the_cancel(monkeypatch) -> None:
-    # Given an update waiting that the read leaves out
-    client = _NoRevisionRead(list(_waiting().rows.values()))
-
-    # When
-    result = _invoke(monkeypatch, client, "--deployment", "dep-prod")
-
-    # Then the service, not the read, says whether one waited
-    assert result.exit_code == 0, result.stderr
-    assert client.cancel_calls == ["dep-prod"]
-    assert _envelope(result)["data"]["cancelledUpdate"]["release"] == {"id": "release-5", "version": 5}
+    assert client.stop_release_calls == [("dep-prod", "release-5")]
 
 
 def test_a_cancel_says_what_it_ended_and_what_still_serves(monkeypatch) -> None:
-    # Given a named deployment waiting on a rollback
-    client = _waiting(kind="rollback", name="production")
+    client = _waiting()
 
-    # When
     result = _invoke(monkeypatch, client, "--deployment", "dep-prod", output="--no-json")
 
-    # Then
+    assert result.exit_code == 0, result.stderr
+    assert "Cancelled the update to release v5. dep-prod keeps serving release v4." in result.stdout
+
+
+def test_a_cancelled_rollback_is_named_a_rollback(monkeypatch) -> None:
+    client = _waiting(kind="rollback", name="production")
+
+    result = _invoke(monkeypatch, client, "--deployment", "dep-prod", output="--no-json")
+
     assert result.exit_code == 0, result.stderr
     assert "Cancelled the rollback to release v5. production (dep-prod) keeps serving release v4." in result.stdout
+    assert client.stop_release_calls == [("dep-prod", "release-5")]
 
 
-def test_a_cancel_with_nothing_waiting_changes_nothing(monkeypatch) -> None:
-    # Given a deployment with no update waiting
+def test_a_gpu_or_region_move_on_the_serving_release_cancels_the_same_way(monkeypatch) -> None:
+    client = _waiting(kind="compute", release_id="release-4")
+
+    result = _invoke(monkeypatch, client, "--deployment", "dep-prod")
+
+    assert result.exit_code == 0, result.stderr
+    assert client.stop_release_calls == [("dep-prod", "release-4")]
+    data = _envelope(result)["data"]
+    assert data["cancelledUpdate"] == {
+        "release": {"id": "release-4", "version": 4},
+        "baseRevision": 3,
+        "kind": "update",
+    }
+    assert data["release"] == {"id": "release-4", "version": 4}
+    jsonschema.Draft202012Validator(_schema()).validate(data)
+
+
+@pytest.mark.parametrize("output", ["--json", "--no-json"])
+def test_a_cancel_with_nothing_waiting_sends_nothing(monkeypatch, output: str) -> None:
     row = deployment("dep-prod", release_id="release-4")
     row["revision"] = 3
     client = FakeDeploy([row])
 
-    # When
-    result = _invoke(monkeypatch, client, "--deployment", "dep-prod")
+    result = _invoke(monkeypatch, client, "--deployment", "dep-prod", output=output)
 
-    # Then
     assert result.exit_code == 0, result.stderr
+    assert client.stop_release_calls == []
+    if output == "--no-json":
+        assert "Deployment dep-prod has no update waiting; it serves release v4." in result.stdout
+        return
     envelope = _envelope(result)
     assert envelope["changed"] is False
     assert envelope["data"]["cancelledUpdate"] is None
@@ -125,68 +125,105 @@ def test_a_cancel_with_nothing_waiting_changes_nothing(monkeypatch) -> None:
     jsonschema.Draft202012Validator(_schema()).validate(envelope["data"])
 
 
-class _Unrouted(FakeDeploy):
-    """A comfy-deploy whose cancel answers 404, with or without its own code."""
-
-    server_code: str | None = None
-
-    def cancel_pending_update(self, deployment_id: str) -> JsonObject:
-        self.cancel_calls.append(deployment_id)
-        details = {"server_code": self.server_code} if self.server_code else None
-        raise DeployAPIError("deploy_not_found", "not found", status=404, details=details)
-
-
-@pytest.mark.parametrize(
-    ("revision", "server_code", "code", "reason", "cancels"),
-    [
-        (None, None, "deploy_updates_unavailable", "service_too_old", 1),
-        (3, None, "deploy_updates_unavailable", "service_too_old", 1),
-        (3, "NOT_FOUND", "deploy_not_found", None, 1),
-    ],
-    ids=["no_revision_in_the_read", "service_too_old", "gone_since_the_read"],
-)
-def test_a_cancel_the_service_cannot_take_says_why(
-    monkeypatch, revision: int | None, server_code: str | None, code: str, reason: str | None, cancels: int
-) -> None:
-    # Given a deployment the read finds, and a cancel the service cannot take
-    row = deployment("dep-prod", release_id="release-4")
-    row["revision"] = revision
-    client = _Unrouted([row])
-    client.server_code = server_code
-
-    # When
-    result = _invoke(monkeypatch, client, "--deployment", "dep-prod")
-
-    # Then
-    error = _envelope(result)["error"]
-    assert result.exit_code == 1
-    assert error["code"] == code
-    assert (error.get("details") or {}).get("reason") == reason
-    assert len(client.cancel_calls) == cancels
-
-
 class _LandedFirst(FakeDeploy):
-    """A deployment whose waiting update lands between the cancel's read and its call."""
+    """A deployment whose waiting update lands between the cancel's read and its stop."""
 
-    def cancel_pending_update(self, deployment_id: str) -> JsonObject:
+    def stop_kept_release(self, deployment_id: str, release_id: str) -> JsonObject:
         self.rows[deployment_id].update({"pendingUpdate": None, "releaseId": "release-5", "revision": 4})
-        return super().cancel_pending_update(deployment_id)
+        return super().stop_kept_release(deployment_id, release_id)
 
 
-def test_a_cancel_the_landing_beat_reports_the_release_that_landed(monkeypatch) -> None:
-    # Given the update to v5 landing before the cancel reaches the service
-    client = _waiting()
-    client = _LandedFirst(list(client.rows.values()))
+@pytest.mark.parametrize("output", ["--json", "--no-json"])
+def test_a_cancel_the_landing_beat_says_the_update_already_landed(monkeypatch, output: str) -> None:
+    client = _LandedFirst(list(_waiting().rows.values()))
 
-    # When
-    result = _invoke(monkeypatch, client, "--deployment", "dep-prod")
+    result = _invoke(monkeypatch, client, "--deployment", "dep-prod", output=output)
 
-    # Then
     assert result.exit_code == 0, result.stderr
-    data = _envelope(result)["data"]
+    assert client.stop_release_calls == [("dep-prod", "release-5")]
+    if output == "--no-json":
+        assert "The update to release v5 already landed; dep-prod serves release v5." in result.stdout
+        return
+    envelope = _envelope(result)
+    assert envelope["changed"] is False
+    data = envelope["data"]
     assert data["cancelledUpdate"] is None
     assert data["release"] == {"id": "release-5", "version": 5}
     assert data["deployment"]["revision"] == 4
+    jsonschema.Draft202012Validator(_schema()).validate(data)
+
+
+class _SlowStop(FakeDeploy):
+    reads = 2
+
+    def stop_kept_release(self, deployment_id: str, release_id: str) -> JsonObject:
+        with self._lock:
+            self.stop_release_calls.append((deployment_id, release_id))
+            self.rows[deployment_id]["pendingUpdate"]["status"] = "failed"
+            return {"releaseId": release_id, "status": "stopping"}
+
+    def get_deployment(self, deployment_id: str) -> JsonObject:
+        if self.stop_release_calls:
+            if self.reads == 0:
+                self.rows[deployment_id]["pendingUpdate"] = None
+            self.reads -= 1
+        return super().get_deployment(deployment_id)
+
+
+def test_an_unfinished_cancellation_is_stopped_again_and_waited_on(monkeypatch) -> None:
+    client = _SlowStop(list(_waiting().rows.values()))
+    client.rows["dep-prod"]["pendingUpdate"]["status"] = "failed"
+    sleeps: list[float] = []
+    monkeypatch.setattr(importlib.import_module("comfy_cli.command.deploy_cancel"), "_sleep", sleeps.append)
+
+    result = _invoke(monkeypatch, client, "--deployment", "dep-prod")
+
+    assert result.exit_code == 0, result.stderr
+    assert client.stop_release_calls == [("dep-prod", "release-5")]
+    assert len(sleeps) == 2
+    envelope = _envelope(result)
+    assert envelope["changed"] is True
+    assert envelope["data"]["cancelledUpdate"]["release"] == {"id": "release-5", "version": 5}
+
+
+class _Replaced(FakeDeploy):
+    def stop_kept_release(self, deployment_id: str, release_id: str) -> JsonObject:
+        reply = super().stop_kept_release(deployment_id, release_id)
+        self.rows[deployment_id]["pendingUpdate"] = {
+            "releaseId": "release-4",
+            "baseRevision": 3,
+            "status": "provisioning",
+            "since": "2026-10-07T12:05:00Z",
+            "kind": "rollback",
+        }
+        return reply
+
+
+def test_a_newer_update_waiting_ends_the_wait_and_names_the_one_stopped(monkeypatch) -> None:
+    client = _Replaced(list(_waiting().rows.values()))
+    monkeypatch.setattr(importlib.import_module("comfy_cli.command.deploy_cancel"), "_sleep", pytest.fail)
+
+    result = _invoke(monkeypatch, client, "--deployment", "dep-prod")
+
+    assert result.exit_code == 0, result.stderr
+    assert client.stop_release_calls == [("dep-prod", "release-5")]
+    assert _envelope(result)["data"]["cancelledUpdate"]["release"] == {"id": "release-5", "version": 5}
+
+
+def test_a_cancellation_that_does_not_finish_hands_the_watch_back(monkeypatch) -> None:
+    client = _SlowStop(list(_waiting().rows.values()))
+    client.reads = 1000
+    module = importlib.import_module("comfy_cli.command.deploy_cancel")
+    monkeypatch.setattr(module, "CANCEL_WATCH_SECONDS", 0.0)
+    monkeypatch.setattr(module, "_sleep", lambda _: None)
+
+    result = _invoke(monkeypatch, client, "--deployment", "dep-prod")
+
+    assert result.exit_code == 75
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_watch_lost"
+    assert "comfy deploy cancel --deployment dep-prod" in error["hint"]
+    assert client.stop_release_calls == [("dep-prod", "release-5")]
 
 
 class _Missing(FakeDeploy):
@@ -206,7 +243,7 @@ def test_a_deployment_that_does_not_exist_is_not_found(monkeypatch) -> None:
     # Then
     assert result.exit_code == 1
     assert _envelope(result)["error"]["code"] == "deploy_not_found"
-    assert client.cancel_calls == []
+    assert client.stop_release_calls == []
 
 
 def test_a_kind_this_client_does_not_know_reads_as_an_update(monkeypatch) -> None:
@@ -230,7 +267,7 @@ def test_cancel_picks_the_builds_only_running_deployment(tmp_path, monkeypatch) 
 
     # Then
     assert result.exit_code == 0, result.stderr
-    assert client.cancel_calls == ["dep-prod"]
+    assert client.stop_release_calls == [("dep-prod", "release-5")]
 
 
 def test_cancel_refuses_to_pick_between_two_running_deployments(tmp_path, monkeypatch) -> None:
@@ -244,4 +281,4 @@ def test_cancel_refuses_to_pick_between_two_running_deployments(tmp_path, monkey
     # Then
     assert result.exit_code == 1
     assert _envelope(result)["error"]["code"] == "deploy_ambiguous_deployment"
-    assert client.cancel_calls == []
+    assert client.stop_release_calls == []

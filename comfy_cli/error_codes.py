@@ -1906,7 +1906,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "The deploy control plane left the reads of a watch (`comfy deploy up`, `promote`, `rollback`, "
         "`comfy deploy status --watch`) unanswered, with an HTTP 5xx or no response, for the whole retry window "
         "of about a minute, or `up`, `promote` or `rollback` followed a move onto another release for an hour "
-        "without it landing. Only the watch "
+        "without it landing, or `comfy deploy cancel` followed the update it stopped for ten minutes without it "
+        "ending. Only the watch "
         "ended: the deployment's outcome is unknown and it may still be coming up. The exit code is 75, not 1, so a "
         "script can tell this from a deployment that failed. `details.deployment_id` names the deployment.",
         "re-attach with `comfy deploy status --deployment <id> --watch` once the deploy service answers again; "
@@ -1951,12 +1952,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "The command needs deployment updates, which are not on for this workspace yet: the deployment "
         "carries no `revision`. `comfy deploy promote` and `rollback` need it to move a deployment in place, "
         "`history` needs it to list the releases a deployment ran, and `comfy deploy events --release` needs it, "
-        "since only there does each event say which release made it. `comfy deploy cancel` answers it too where "
-        "the deploy service is too old to cancel an update. "
+        "since only there does each event say which release made it. "
         "`details.deployment_id` names the deployment that was read.",
         "for `events --release`, run it without `--release`; for `history`, read `comfy deploy events`; for "
         "`promote` or `rollback`, run the hint's `comfy deploy up --create --release <id>` to start a separate "
-        "deployment on that release; for `cancel`, wait until the update lands or fails",
+        "deployment on that release",
     ),
     ErrorCode(
         "deploy_delete_needs_confirm",

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import urllib.error
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Final, Protocol, runtime_checkable
 
 import typer
 
@@ -20,8 +20,14 @@ from comfy_cli.command.deploy_resolve import (
     deployment_id_for,
     sole_deployment,
 )
+from comfy_cli.command.deploy_runtime import (
+    DeployWatchLostError,
+    exit_watch_lost,
+    poll_deployment,
+    render_spec_error,
+)
 from comfy_cli.command.deploy_runtime import command_clients as _command_clients
-from comfy_cli.command.deploy_runtime import render_spec_error
+from comfy_cli.command.deploy_runtime import sleep as _sleep
 from comfy_cli.command.deploy_types import (
     deployment_label,
     deployment_name,
@@ -37,6 +43,9 @@ from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output import get_renderer
 
+CANCEL_WATCH_SECONDS: Final = 600.0
+_SAME_UPDATE: Final = ("releaseId", "baseRevision", "since", "instanceGroupId")
+
 
 @dataclass(frozen=True, slots=True)
 class CancelRequest:
@@ -48,18 +57,7 @@ class CancelRequest:
 class DeploymentCancelClient(DeploymentListClient, Protocol):
     def get_deployment(self, deployment_id: str, /) -> JsonObject: ...
 
-    def cancel_pending_update(self, deployment_id: str, /) -> JsonObject: ...
-
-
-class CancelUnavailableError(DeployResolveError):
-    """A deploy service too old for the cancel route: it ends once that ships."""
-
-    code = "deploy_updates_unavailable"
-    hint = "wait until the update lands or fails; `comfy deploy status` shows it"
-
-    def __init__(self, deployment_id: str) -> None:
-        self.details = {"deployment_id": deployment_id, "reason": "service_too_old"}
-        super().__init__(f"the deploy service cannot cancel the update of deployment {deployment_id} yet")
+    def stop_kept_release(self, deployment_id: str, release_id: str, /) -> JsonObject: ...
 
 
 class NoDeploymentToCancelError(DeployResolveError):
@@ -84,6 +82,7 @@ class CancelResult:
     release: JsonObject
     # The update the cancel ended, or None where nothing waited.
     cancelled: JsonObject | None
+    landed: JsonObject | None = None
 
     def payload(self) -> JsonObject:
         deployment: JsonObject = {
@@ -124,47 +123,54 @@ def _release(builder: BuilderReleaseClient, releases: Sequence[JsonObject], rele
     return release_or_id(builder, release_id)
 
 
-def _cancelled(builder: BuilderReleaseClient, releases: Sequence[JsonObject], answer: JsonObject) -> JsonObject:
-    ended = answer.get("cancelledUpdate")
-    if not isinstance(ended, dict):
-        raise server_shape_error("the cancel response names no cancelledUpdate", field="cancelledUpdate")
-    kind = ended.get("kind")
+def _cancelled(builder: BuilderReleaseClient, releases: Sequence[JsonObject], pending: JsonObject) -> JsonObject:
+    kind = pending.get("kind")
     return {
-        "release": _release(builder, releases, required_string(ended, "releaseId")),
-        "baseRevision": required_int(ended, "baseRevision"),
+        "release": _release(builder, releases, required_string(pending, "releaseId")),
+        "baseRevision": required_int(pending, "baseRevision"),
         # Open on the service's side: a kind this client does not know reads as an update.
         "kind": "rollback" if kind == "rollback" else "update",
     }
 
 
+def _waiting(deployment: JsonObject) -> JsonObject | None:
+    pending = deployment.get("pendingUpdate")
+    return pending if isinstance(pending, dict) else None
+
+
+def _ended(pending: JsonObject) -> Callable[[JsonObject], bool]:
+    def settled(snapshot: JsonObject) -> bool:
+        now = _waiting(snapshot)
+        return now is None or any(now.get(field) != pending.get(field) for field in _SAME_UPDATE)
+
+    return settled
+
+
 def cancel(builder: BuilderReleaseClient, client: DeploymentCancelClient, request: CancelRequest) -> CancelResult:
     deployment_id, releases = _picked_deployment(builder, client, request)
-    # Read first, as rollback does: a missing deployment answers here. A read
-    # with no revision still sends the cancel, since the service leaves it out
-    # whenever its rollout check fails, while an update may still wait.
-    client.get_deployment(deployment_id)
+    deployment = client.get_deployment(deployment_id)
+    pending = _waiting(deployment)
+    if pending is None:
+        return CancelResult(deployment, _release(builder, releases, required_string(deployment, "releaseId")), None)
+    update = _cancelled(builder, releases, pending)
     try:
-        answer = client.cancel_pending_update(deployment_id)
+        client.stop_kept_release(deployment_id, required_string(pending, "releaseId"))
     except DeployAPIError as error:
-        server_code = (error.details or {}).get("server_code")
-        if error.status == 409 and server_code == "NO_PENDING_UPDATE":
-            # Nothing waits, so nothing changed. Read again: the update may
-            # have landed since the first read.
-            deployment = client.get_deployment(deployment_id)
-            return CancelResult(deployment, _release(builder, releases, required_string(deployment, "releaseId")), None)
-        # The deployment was just read, so a 404 without the service's own
-        # code is a comfy-deploy too old to know the route; with it, the
-        # deployment went since, and the error says so.
-        if error.status == 404 and server_code != "NOT_FOUND":
-            raise CancelUnavailableError(deployment_id) from error
-        raise
-    cancelled = _cancelled(builder, releases, answer)
-    return CancelResult(answer, _release(builder, releases, required_string(answer, "releaseId")), cancelled)
+        if error.status != 409 or (error.details or {}).get("server_code") != "CURRENT_RELEASE":
+            raise
+        deployment = client.get_deployment(deployment_id)
+        serving = _release(builder, releases, required_string(deployment, "releaseId"))
+        return CancelResult(deployment, serving, None, landed=update)
+    deployment = poll_deployment(client, deployment_id, _sleep, settled=_ended(pending), limit=CANCEL_WATCH_SECONDS)
+    return CancelResult(deployment, _release(builder, releases, required_string(deployment, "releaseId")), update)
 
 
 def _cancel_text(result: CancelResult) -> str:
     label = deployment_label(result.deployment)
     serving = release_label(result.release)
+    if result.landed is not None:
+        target = release_label(result.landed["release"])
+        return f"The {result.landed['kind']} to {target} already landed; {label} serves {serving}."
     if result.cancelled is None:
         return f"Deployment {label} has no update waiting; it serves {serving}."
     noun = result.cancelled["kind"]
@@ -187,6 +193,12 @@ def run_cancel(request: CancelRequest) -> None:
     except (DeployResolveError, DeployAPIError) as error:
         renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
+    except DeployWatchLostError as error:
+        hint = (
+            f"run `comfy deploy cancel --deployment {error.deployment_id}` again: it stops the update's copy "
+            "again while its cancellation has not finished"
+        )
+        exit_watch_lost(renderer, error, hint)
     except BuilderAuthError as error:
         renderer.error(code="deploy_not_signed_in", message=str(error))
         raise typer.Exit(code=1) from error

@@ -117,9 +117,9 @@ class DeployRecordingTransport:
                 200,
                 {"id": DEPLOYMENT_ID, "revision": 2, "releaseId": RELEASE_ID, "kind": "update"},
             ),
-            ("DELETE", f"/v1/deployments/{DEPLOYMENT_ID}/pending-update"): (
-                200,
-                {**row, "cancelledUpdate": {"releaseId": RELEASE_ID, "baseRevision": 1, "kind": "update"}},
+            ("PATCH", f"/v1/deployments/{DEPLOYMENT_ID}/releases/{RELEASE_ID}"): (
+                202,
+                {"releaseId": RELEASE_ID, "status": "stopping"},
             ),
             ("POST", f"/v1/deployments/{DEPLOYMENT_ID}/stop"): (202, {**row, "status": "stopping"}),
             ("POST", f"/v1/deployments/{DEPLOYMENT_ID}/start"): (202, {**row, "status": "queued"}),
